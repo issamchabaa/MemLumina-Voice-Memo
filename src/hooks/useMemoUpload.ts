@@ -10,7 +10,7 @@ export const useMemoUpload = () => {
 
   const performUpload = async (userId: string, memoId: string, blob: Blob, captureMode: string) => {
     // 1. Create/Update Firestore document reference
-    const voiceMemosRef = collection(db, 'voice_memos');
+    const voiceMemosRef = collection(db, `users/${userId}/voice_memos`);
     const memoDocRef = doc(voiceMemosRef, memoId);
 
     // Initial record creation
@@ -77,7 +77,7 @@ export const useMemoUpload = () => {
     setIsUploading(true);
     setError(null);
 
-    const voiceMemosRef = collection(db, 'voice_memos');
+    const voiceMemosRef = collection(db, `users/${user.uid}/voice_memos`);
     const memoId = doc(voiceMemosRef).id;
 
     if (!navigator.onLine) {

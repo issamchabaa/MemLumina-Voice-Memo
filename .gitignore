@@ -23,6 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 
+# Env vars
+.env*
+.env.local
+
 # Firebase
 .firebase/
 functions/lib/

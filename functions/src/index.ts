@@ -1,14 +1,17 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { v2 } from '@google-cloud/speech';
+import { SpeechClient } from '@google-cloud/speech';
 import { GoogleGenAI } from '@google/genai';
 import { createHash } from 'crypto';
 import { ClerkJob, RawTurn } from './types';
 
 admin.initializeApp();
+ 
+// STT V1 client
+const speechClient = new SpeechClient();
 
 // V2 client
-const speechClient = new v2.SpeechClient();
+// STT logic integrated below
 
 /**
  * Triggered when a new voice memo is uploaded to Firebase Storage.
@@ -27,34 +30,24 @@ export const onMemoUploaded = functions.storage.object().onFinalize(async (objec
   const userId = parts[1];
   const fileName = parts[parts.length - 1];
   const memoId = fileName.split('.')[0];
-
-  console.log(`Processing memo ${memoId} for user ${userId} using STT V2 (Chirp 2)`);
-
   const gcsUri = `gs://${object.bucket}/${filePath}`;
-  
-  // V2 requires a project and location for the recognizer
   const projectId = admin.instanceId().app.options.projectId || process.env.GCLOUD_PROJECT;
-  const location = 'us-central1'; // Chirp 2 is widely available here
-  
-  const parent = `projects/${projectId}/locations/${location}`;
-  
-  const recognitionConfig = {
-    autoDecodingConfig: {}, 
-    model: 'chirp-2',
-    languageCodes: ['en-US'],
-    features: {
+
+  const request = {
+    audio: {
+      uri: gcsUri,
+    },
+    config: {
+      encoding: 'ENCODING_UNSPECIFIED' as any,
+      languageCode: 'en-US',
+      alternativeLanguageCodes: ['fr-FR'],
       enableAutomaticPunctuation: true,
+      model: 'default',
     },
   };
 
-  const request = {
-    recognizer: `${parent}/recognizers/_`, 
-    config: recognitionConfig,
-    uri: gcsUri,
-  };
-
   try {
-    const docRef = admin.firestore().collection('voice_memos').doc(memoId);
+    const docRef = admin.firestore().collection(`users/${userId}/voice_memos`).doc(memoId);
     
     const docSnap = await docRef.get();
     if (!docSnap.exists) {
@@ -72,8 +65,10 @@ export const onMemoUploaded = functions.storage.object().onFinalize(async (objec
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    console.log('Starting V2 transcription for:', gcsUri);
-    const [response] = await speechClient.recognize(request);
+    console.log(`Starting STT V1 transcription (Long-Running) for: ${gcsUri}`);
+    
+    const [operation] = await speechClient.longRunningRecognize(request as any);
+    const [response] = await operation.promise();
     
     const transcript = response.results
       ?.map(result => result.alternatives?.[0].transcript)
@@ -87,19 +82,28 @@ export const onMemoUploaded = functions.storage.object().onFinalize(async (objec
       ? transcriptConfidences.reduce((sum, value) => sum + value, 0) / transcriptConfidences.length
       : null;
 
-    const transcriptProvider = 'google_speech_to_text_v2';
-    const transcriptModel = 'chirp-2';
-    const transcriptLanguage = 'en-US';
+    const transcriptLanguage = response.results?.[0]?.languageCode || 'en-US';
 
-    console.log('V2 Transcription successful:', transcript);
+    console.log(`STT V1 Transcription successful (${transcriptLanguage}):`, transcript);
+
+    const transcriptProvider = 'google_speech_to_text_v1';
+    const transcriptModel = 'default';
 
     let cleanTranscriptText = transcript || '';
     if (transcript) {
       try {
         const ai = new GoogleGenAI({ project: projectId, location: 'us-central1', vertexai: true });
         const aiResponse = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: `Please clean up the following raw voice transcription, fixing any grammatical errors, removing filler words (ums, ahs), and formatting it into a clear, concise memo. Keep the original meaning and tone intact.
+          model: 'gemini-1.5-flash-002',
+          contents: `You are an expert cognitive assistant. Your task is to refine a raw voice transcription into a high-quality cognitive memo.
+The transcription may be in English or French. Maintain the original language of the speaker.
+
+Follow these rules:
+1. FIX errors: Correct typos, grammatical slips, and misheard words in the detected language.
+2. REMOVE noise: Strip filler words (ums, ahs, like, you know, euh, alors), false starts, and redundant repetitions.
+3. STRUCTURE: Use clear headings if the content is long. Use bullet points for lists of items or instructions.
+4. TONE: Maintain the speaker's original intent and urgency, but make it professional and readable.
+5. FORMAT: Return only the cleaned text in the original language.
 
 Raw Transcript:
 ${transcript}`
@@ -114,7 +118,7 @@ ${transcript}`
     await docRef.update({
       status: 'transcribed',
       transcriptText: cleanTranscriptText,
-      rawTranscriptText: transcript || '', // Keep raw for observability/correction
+      rawTranscriptText: transcript || '', 
       transcriptProvider,
       transcriptModel,
       transcriptLanguage,
@@ -126,7 +130,7 @@ ${transcript}`
     console.error('STT V2 Transcription process failed:', error);
     
     try {
-      const docRef = admin.firestore().collection('voice_memos').doc(memoId);
+      const docRef = admin.firestore().collection(`users/${userId}/voice_memos`).doc(memoId);
       await docRef.update({
         status: 'error',
         errorDetails: (error as Error).message,
@@ -155,7 +159,7 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
   }
 
   const db = admin.firestore();
-  const memoRef = db.collection('voice_memos').doc(memoId);
+  const memoRef = db.collection(`users/${context.auth.uid}/voice_memos`).doc(memoId);
   const memoSnap = await memoRef.get();
 
   if (!memoSnap.exists) {
@@ -241,7 +245,7 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
   };
 
   try {
-    const rawTurnRef = db.collection('raw_turns').doc(rawTurnId);
+    const rawTurnRef = db.collection(`users/${context.auth.uid}/cls/root/raw_turns`).doc(rawTurnId);
     
     // Explicit idempotency check
     const rawTurnSnap = await rawTurnRef.get();
@@ -259,7 +263,7 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
     
     // Use create to ensure we don't overwrite if it somehow was created concurrently
     batch.create(rawTurnRef, rawTurn);
-    batch.create(db.collection('clerk_jobs').doc(clerkJob.id), clerkJob);
+    batch.create(db.collection(`users/${context.auth.uid}/cls/root/clerk_jobs`).doc(clerkJob.id), clerkJob);
     
     const memoUpdateData: any = {
       status: 'submitted',
@@ -303,7 +307,7 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
  * Triggered when a ClerkJob is updated.
  * If the job status is DONE, find the associated memo and update its status to 'processed'.
  */
-export const onClerkJobUpdated = functions.firestore.document('clerk_jobs/{jobId}').onUpdate(async (change, context) => {
+export const onClerkJobUpdated = functions.firestore.document('users/{userId}/cls/root/clerk_jobs/{jobId}').onUpdate(async (change, context) => {
   const newValue = change.after.data() as ClerkJob;
   const previousValue = change.before.data() as ClerkJob;
 
@@ -316,7 +320,7 @@ export const onClerkJobUpdated = functions.firestore.document('clerk_jobs/{jobId
       console.log(`ClerkJob ${context.params.jobId} completed. Updating memo ${memoId} to 'processed'`);
       
       try {
-        const memoRef = db.collection('voice_memos').doc(memoId);
+        const memoRef = db.collection(`users/${newValue.userId}/voice_memos`).doc(memoId);
         const memoSnap = await memoRef.get();
         
         await memoRef.update({

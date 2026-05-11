@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
@@ -6,12 +7,12 @@ import { getFunctions } from "firebase/functions";
 
 // Replace with actual config
 const firebaseConfig = {
-  apiKey: "AIzaSyCg8zsClXgKzsgtw7mX5n99vS1Ne8eewa8",
-  authDomain: "sheep-db1.firebaseapp.com",
-  projectId: "sheep-db1",
-  storageBucket: "sheep-db1.firebasestorage.app",
-  messagingSenderId: "31297412046",
-  appId: "1:31297412046:web:6f86d08263c262a907299f"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
 const app = initializeApp(firebaseConfig);

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
+import { db, auth } from '../firebase';
 
 export interface MemoStatus {
   status: 'uploading' | 'recorded' | 'transcribing' | 'transcribed' | 'error' | 'submitted' | 'processed';
@@ -25,7 +25,7 @@ export const useMemoStatus = (memoId: string | null) => {
     }
 
     setIsLoading(true);
-    const docRef = doc(db, 'voice_memos', memoId);
+    const docRef = doc(db, `users/${auth.currentUser?.uid}/voice_memos`, memoId);
 
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {

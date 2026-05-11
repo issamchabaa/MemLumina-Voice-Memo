@@ -1,9 +1,9 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /voice_memos/{memoId} {
+    match /users/{userId}/voice_memos/{memoId} {
       // Users can only read their own memos
-      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow read: if request.auth != null && userId == request.auth.uid;
       
       // Users can create a memo if they are authenticated and set themselves as the owner
       // Initial status must be 'uploading'
@@ -14,7 +14,7 @@ service cloud.firestore {
       // Users can update their own memos, but only specific fields during the upload process
       // They cannot modify the transcript or set status to processed/transcribed
       allow update: if request.auth != null 
-                    && resource.data.userId == request.auth.uid
+                    && userId == request.auth.uid
                     && request.resource.data.userId == request.auth.uid
                     && (
                       // Allow transition from 'uploading' to 'recorded'
@@ -25,7 +25,7 @@ service cloud.firestore {
                     && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['transcriptText', 'errorDetails', 'clerkJobId']);
       
       // Delete only by owner
-      allow delete: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow delete: if request.auth != null && userId == request.auth.uid;
     }
   }
 }

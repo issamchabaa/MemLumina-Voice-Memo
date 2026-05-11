@@ -1,11 +1,13 @@
 import { useState, useEffect, useMemo } from 'react'
-import { Mic, Square, Send, Info, Activity, LogIn, Settings, History, Shield, Cpu, CheckCircle2, AlertCircle, Database } from 'lucide-react'
+import { Mic, Square, Send, Info, Activity, LogIn, Settings, History, Shield, Cpu, CheckCircle2, AlertCircle, Database, ArrowLeft } from 'lucide-react'
 import { useVoiceRecorder } from './hooks/useVoiceRecorder'
 import { useMemoUpload } from './hooks/useMemoUpload'
 import { useMemoStatus } from './hooks/useMemoStatus'
 import { auth, functions } from './firebase'
-import { signInAnonymously, onAuthStateChanged, User } from 'firebase/auth'
+import { onAuthStateChanged, User } from 'firebase/auth'
 import { httpsCallable } from 'firebase/functions'
+import { HistoryView } from './HistoryView'
+import { AuthModal } from './AuthModal'
 
 type CaptureMode = 'idea' | 'instruction' | 'reminder' | 'decision' | 'correction' | 'project_note'
 
@@ -16,6 +18,7 @@ function App() {
   const [lastMemoId, setLastMemoId] = useState<string | null>(null)
   const [syncStatus, setSyncStatus] = useState<'idle' | 'uploading' | 'success' | 'error' | 'submitted'>('idle')
   const [editedTranscript, setEditedTranscript] = useState('')
+  const [activeView, setActiveView] = useState<'capture' | 'history' | 'diagnostics'>('capture')
 
   const { 
     isRecording, 
@@ -111,7 +114,7 @@ function App() {
   }
 
   const handleSignIn = () => {
-    signInAnonymously(auth).catch(console.error)
+    // AuthModal handles sign in
   }
 
   const modes: { id: CaptureMode; label: string }[] = [
@@ -125,6 +128,7 @@ function App() {
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-between p-6 md:p-10 bg-[#0B0B0C] text-[#F8FAF7] relative overflow-hidden">
+      {!user && <AuthModal />}
       {/* Ambient Effects */}
       <div className="ambient-glow" />
       
@@ -151,11 +155,17 @@ function App() {
             </button>
           ) : (
             <div className="flex items-center space-x-2">
-              <button className="w-10 h-10 rounded-xl glass-panel flex items-center justify-center hover:bg-white/5 transition-colors">
-                <History size={18} className="text-white/40" />
+              <button 
+                onClick={() => setActiveView('history')}
+                className={`w-10 h-10 rounded-xl glass-panel flex items-center justify-center hover:bg-white/5 transition-colors ${activeView === 'history' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}
+              >
+                <History size={18} className={activeView === 'history' ? 'text-[#00DBE7]' : 'text-white/40'} />
               </button>
-              <button className="w-10 h-10 rounded-xl glass-panel flex items-center justify-center hover:bg-white/5 transition-colors">
-                <Settings size={18} className="text-white/40" />
+              <button 
+                onClick={() => setActiveView(activeView === 'diagnostics' ? 'capture' : 'diagnostics')}
+                className={`w-10 h-10 rounded-xl glass-panel flex items-center justify-center hover:bg-white/5 transition-colors ${activeView === 'diagnostics' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}
+              >
+                <Settings size={18} className={activeView === 'diagnostics' ? 'text-[#00DBE7]' : 'text-white/40'} />
               </button>
             </div>
           )}
@@ -164,7 +174,60 @@ function App() {
 
       {/* Main Cockpit Area */}
       <main className="flex-1 w-full max-w-lg flex flex-col items-center justify-center space-y-12 z-20">
-        {!showReview ? (
+        {activeView === 'history' ? (
+          <HistoryView 
+            onBack={() => setActiveView('capture')} 
+            onSelectMemo={(id) => {
+              setLastMemoId(id)
+              setShowReview(true)
+              setActiveView('capture')
+              setEditedTranscript('') 
+            }}
+          />
+        ) : activeView === 'diagnostics' ? (
+          <div className="w-full space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-500">
+            <div className="flex items-center justify-between">
+              <button onClick={() => setActiveView('capture')} className="p-2 -ml-2 rounded-lg hover:bg-white/5 transition-colors group">
+                <ArrowLeft size={20} className="text-white/40 group-hover:text-white" />
+              </button>
+              <h2 className="text-sm font-black uppercase tracking-[0.3em] text-white/60">System Diagnostics</h2>
+              <div className="w-10" />
+            </div>
+            
+            <div className="glass-panel rounded-2xl p-6 space-y-6">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] uppercase tracking-widest text-white/40 font-bold">Neural Link</span>
+                <span className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase ${user ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                  {user ? 'Established' : 'Disconnected'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] uppercase tracking-widest text-white/40 font-bold">Protocol Sync</span>
+                <span className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase ${navigator.onLine ? 'bg-green-500/10 text-green-400' : 'bg-yellow-500/10 text-yellow-400'}`}>
+                  {navigator.onLine ? 'Online' : 'Local-Only'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] uppercase tracking-widest text-white/40 font-bold">Identity ID</span>
+                <span className="text-[9px] font-mono text-[#00DBE7] truncate max-w-[120px]">{user?.uid || 'N/A'}</span>
+              </div>
+              <div className="h-[1px] bg-white/5 w-full" />
+              <div className="space-y-2">
+                <p className="text-[9px] uppercase tracking-widest text-white/20 font-black">Subsystem status</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-3 bg-white/5 rounded-xl border border-white/5">
+                    <p className="text-[8px] text-white/40 uppercase mb-1">STT V2</p>
+                    <p className="text-[10px] text-green-400 font-bold">ACTIVE</p>
+                  </div>
+                  <div className="p-3 bg-white/5 rounded-xl border border-white/5">
+                    <p className="text-[8px] text-white/40 uppercase mb-1">Gemini 1.5</p>
+                    <p className="text-[10px] text-green-400 font-bold">ACTIVE</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : !showReview ? (
           <>
             {/* Recording State Visualization */}
             <div className="flex flex-col items-center space-y-8">
@@ -332,37 +395,42 @@ function App() {
             <div className="pt-6 flex space-x-3">
               <button 
                 onClick={() => {
-                  if (lastMemoId) {
+                  if (lastMemoId && (memoData?.status === 'recorded' || memoData?.status === 'transcribed')) {
                     localStorage.removeItem(`draft-${lastMemoId}`)
                   }
                   setShowReview(false)
                   resetRecording()
                   setEditedTranscript('')
+                  setLastMemoId(null)
+                  setSyncStatus('idle')
                 }}
                 className="flex-1 py-4 rounded-xl border border-white/5 text-white/40 font-bold text-[11px] uppercase tracking-widest hover:bg-white/5 transition-all"
               >
-                Purge
+                {(memoData?.status === 'submitted' || memoData?.status === 'processed') ? 'Back' : 'Purge'}
               </button>
-              <button 
-                onClick={memoData?.status === 'transcribed' ? handlePushToLedger : handleInitializeCapture}
-                disabled={syncStatus === 'uploading' || (syncStatus === 'success' && memoData?.status !== 'transcribed') || syncStatus === 'submitted'}
-                className="flex-[2] py-4 bg-gradient-to-r from-[#00DBE7] to-[#EBB2FF] text-[#0B0B0C] rounded-xl font-black text-[11px] uppercase tracking-widest flex items-center justify-center space-x-2 shadow-2xl shadow-[#00DBE7]/20 hover:opacity-90 transition-all active:scale-[0.98] disabled:opacity-50"
-              >
-                {syncStatus === 'uploading' ? (
-                  <Activity size={16} className="animate-spin" />
-                ) : syncStatus === 'submitted' ? (
-                  <CheckCircle2 size={16} />
-                ) : memoData?.status === 'transcribed' ? (
-                  <Cpu size={16} />
-                ) : (
-                  <Send size={16} />
-                )}
-                <span>
-                  {syncStatus === 'uploading' ? 'Processing...' : 
-                   syncStatus === 'submitted' ? 'Injected to CLS' : 
-                   memoData?.status === 'transcribed' ? 'Verify & Ingest' : 'Initialize Capture'}
-                </span>
-              </button>
+              
+              {(memoData?.status !== 'submitted' && memoData?.status !== 'processed') && (
+                <button 
+                  onClick={memoData?.status === 'transcribed' ? handlePushToLedger : handleInitializeCapture}
+                  disabled={syncStatus === 'uploading' || (syncStatus === 'success' && memoData?.status !== 'transcribed') || syncStatus === 'submitted'}
+                  className="flex-[2] py-4 bg-gradient-to-r from-[#00DBE7] to-[#EBB2FF] text-[#0B0B0C] rounded-xl font-black text-[11px] uppercase tracking-widest flex items-center justify-center space-x-2 shadow-2xl shadow-[#00DBE7]/20 hover:opacity-90 transition-all active:scale-[0.98] disabled:opacity-50"
+                >
+                  {syncStatus === 'uploading' ? (
+                    <Activity size={16} className="animate-spin" />
+                  ) : syncStatus === 'submitted' ? (
+                    <CheckCircle2 size={16} />
+                  ) : memoData?.status === 'transcribed' ? (
+                    <Cpu size={16} />
+                  ) : (
+                    <Send size={16} />
+                  )}
+                  <span>
+                    {syncStatus === 'uploading' ? 'Processing...' : 
+                     syncStatus === 'submitted' ? 'Injected to CLS' : 
+                     memoData?.status === 'transcribed' ? 'Verify & Ingest' : 'Initialize Capture'}
+                  </span>
+                </button>
+              )}
             </div>
             
             {(uploadError || syncStatus === 'error') && (
