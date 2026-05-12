@@ -1,10 +1,33 @@
 import { useState, useRef, useCallback } from 'react';
 
+export type RecorderErrorCode = 'permission_denied' | 'device_unavailable' | 'format_unsupported' | 'unknown'
+
+export interface RecorderError {
+  code: RecorderErrorCode
+  message: string
+}
+
+function classifyRecorderError(err: any): RecorderError {
+  const name = err?.name || ''
+  const msg = err?.message || ''
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+    return { code: 'permission_denied', message: 'Microphone access was denied. Allow microphone permissions in your browser settings and try again.' }
+  }
+  if (name === 'NotFoundError' || name === 'NotReadableError' || name === 'OverconstrainedError') {
+    return { code: 'device_unavailable', message: 'No microphone detected or the device is busy. Connect a microphone and try again.' }
+  }
+  if (msg.includes('mimetype') || msg.includes('MediaRecorder')) {
+    return { code: 'format_unsupported', message: 'Your browser does not support a compatible recording format (webm/mp4).' }
+  }
+  return { code: 'unknown', message: `Recording failed: ${msg || 'Unknown error'}` }
+}
+
 export const useVoiceRecorder = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [duration, setDuration] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [recorderError, setRecorderError] = useState<RecorderError | null>(null);
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -14,13 +37,22 @@ export const useVoiceRecorder = () => {
   const chunksRef = useRef<Blob[]>([]);
 
   const startRecording = useCallback(async () => {
+    setRecorderError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // Determine supported mime type
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm') 
-        ? 'audio/webm' 
-        : 'audio/mp4';
+      // Validate MIME type support before constructing MediaRecorder
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+          ? 'audio/mp4'
+          : null;
+
+      if (!mimeType) {
+        stream.getTracks().forEach(t => t.stop());
+        setRecorderError({ code: 'format_unsupported', message: 'Your browser does not support a compatible recording format (webm/mp4).' });
+        return;
+      }
         
       const mediaRecorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
@@ -72,6 +104,7 @@ export const useVoiceRecorder = () => {
 
     } catch (err) {
       console.error('Failed to start recording', err);
+      setRecorderError(classifyRecorderError(err));
     }
   }, []);
 
@@ -92,6 +125,7 @@ export const useVoiceRecorder = () => {
     setAudioBlob(null);
     setDuration(0);
     setAudioLevel(0);
+    setRecorderError(null);
   }, []);
 
   return {
@@ -99,8 +133,11 @@ export const useVoiceRecorder = () => {
     audioBlob,
     duration,
     audioLevel,
+    recorderError,
+    clearRecorderError: useCallback(() => setRecorderError(null), []),
     startRecording,
     stopRecording,
     resetRecording
   };
 };
+

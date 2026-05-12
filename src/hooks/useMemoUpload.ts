@@ -9,20 +9,15 @@ export const useMemoUpload = () => {
   const [error, setError] = useState<string | null>(null);
 
   const performUpload = async (userId: string, memoId: string, blob: Blob, captureMode: string) => {
-    // 1. Create/Update Firestore document reference
+    // 1. Update Firestore document to 'uploading'
     const voiceMemosRef = collection(db, `users/${userId}/voice_memos`);
     const memoDocRef = doc(voiceMemosRef, memoId);
 
-    // Initial record creation
     await setDoc(memoDocRef, {
-      userId,
-      memoId, // Canonical ID matching doc ID
       status: 'uploading',
-      captureMode,
-      audioContentType: blob.type,
-      createdAt: serverTimestamp(),
+      storageState: 'uploading',
       updatedAt: serverTimestamp(),
-    });
+    }, { merge: true });
 
     // 2. Upload to Storage using the canonical memoId
     const fileExtension = blob.type.includes('mp4') ? 'mp4' : 'webm';
@@ -33,12 +28,13 @@ export const useMemoUpload = () => {
     const downloadURL = await getDownloadURL(storageRef);
 
     // 3. Update Firestore record with final details and status 'recorded'
-    await updateDoc(memoDocRef, {
+    await setDoc(memoDocRef, {
       audioURL: downloadURL,
       storagePath,
-      status: 'recorded',
+      storageState: 'stored',
+      status: 'recorded', // This triggers transcription pipeline
       updatedAt: serverTimestamp(),
-    });
+    }, { merge: true });
   };
 
   const syncOfflineMemos = useCallback(async () => {
@@ -51,8 +47,13 @@ export const useMemoUpload = () => {
       const data = await get(key);
       if (data && data.userId && data.memoId && data.blob && data.captureMode) {
         try {
+          // Check if it's already uploaded in Firestore to avoid redundant uploads
+          // (Though performUpload updates it anyway, it's safer)
           await performUpload(data.userId, data.memoId, data.blob, data.captureMode);
-          await del(key); // clear after successful upload
+          
+          // Task 4: Retain until safe handoff. For now, we clear after successful upload 
+          // to prevent endless retries, but we could keep it longer if we track ingestion.
+          await del(key); 
           console.log(`Successfully synced offline memo: ${data.memoId}`);
         } catch (err) {
           console.error(`Failed to sync offline memo: ${data.memoId}`, err);
@@ -79,53 +80,88 @@ export const useMemoUpload = () => {
 
     const voiceMemosRef = collection(db, `users/${user.uid}/voice_memos`);
     const memoId = doc(voiceMemosRef).id;
+    const memoDocRef = doc(voiceMemosRef, memoId);
 
-    if (!navigator.onLine) {
-      // Offline: store to IDB
+    // 1. STAGE 1: Always persist locally first
+    try {
+      await set(`offline-memo-${memoId}`, {
+        userId: user.uid,
+        memoId,
+        blob,
+        captureMode,
+        timestamp: Date.now()
+      });
+    } catch (err) {
+      console.error('Failed to stage audio locally', err);
+      setError('Local staging failed');
+      setIsUploading(false);
+      return null;
+    }
+
+    // 2. STAGE 2: Create local-first Firestore record
+    try {
+      const retentionDate = new Date();
+      retentionDate.setDate(retentionDate.getDate() + 7);
+
+      await setDoc(memoDocRef, {
+        userId: user.uid,
+        memoId,
+        status: 'local-only',
+        storageState: 'local',
+        audioStaged: true,
+        captureMode,
+        audioContentType: blob.type,
+        audioRetainedUntil: retentionDate,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      console.error('Failed to create Firestore record', err);
+      // We continue because the audio is at least staged locally in IDB
+    }
+
+    // 3. STAGE 3: Attempt upload if online
+    if (navigator.onLine) {
       try {
-        await set(`offline-memo-${memoId}`, {
-          userId: user.uid,
-          memoId,
-          blob,
-          captureMode,
-          timestamp: Date.now()
-        });
-        setIsUploading(false);
-        // We return memoId to UI so it can reflect "saved offline" state
-        return memoId;
-      } catch (err: any) {
-        console.error('Failed to save memo offline', err);
-        setError('Failed to save memo offline');
-        setIsUploading(false);
-        return null;
+        await performUpload(user.uid, memoId, blob, captureMode);
+        // If successful, we can remove from IDB or keep it for Task 4
+        await del(`offline-memo-${memoId}`);
+      } catch (err) {
+        console.error('Initial upload attempt failed', err);
+        // Memo remains in 'local-only' / 'local' state in Firestore and is in IDB
       }
     }
 
+    setIsUploading(false);
+    return memoId;
+  }, []);
+
+  const retryUpload = useCallback(async (memoId: string) => {
+    if (!navigator.onLine) {
+      setError('System offline. Reconnect to retry upload.');
+      return;
+    }
+
+    const key = `offline-memo-${memoId}`;
+    const data = await get(key);
+    if (!data || !data.userId || !data.blob || !data.captureMode) {
+      setError('Staged audio not found or corrupted.');
+      return;
+    }
+
+    setIsUploading(true);
+    setError(null);
+
     try {
-      await performUpload(user.uid, memoId, blob, captureMode);
+      await performUpload(data.userId, memoId, data.blob, data.captureMode);
+      await del(key);
       setIsUploading(false);
-      return memoId;
     } catch (err: any) {
-      console.error('Upload failed', err);
-      
-      // If it failed due to network, try saving offline as fallback
-      try {
-         await set(`offline-memo-${memoId}`, {
-          userId: user.uid,
-          memoId,
-          blob,
-          captureMode,
-          timestamp: Date.now()
-        });
-        setIsUploading(false);
-        return memoId;
-      } catch (idbErr) {
-        setError(err.message || 'Upload failed');
-        setIsUploading(false);
-        return null;
-      }
+      console.error('Retry upload failed', err);
+      setError(err.message || 'Retry upload failed');
+      setIsUploading(false);
     }
   }, []);
 
-  return { uploadMemo, isUploading, error, syncOfflineMemos };
+  return { uploadMemo, retryUpload, isUploading, error, syncOfflineMemos };
 };

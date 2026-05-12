@@ -1,41 +1,81 @@
-import { useState, useEffect, useMemo } from 'react'
-import { Mic, Square, Send, Info, Activity, LogIn, Settings, History, Shield, Cpu, CheckCircle2, AlertCircle, Database, ArrowLeft } from 'lucide-react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { Mic, Square, Send, Info, Activity, LogIn, Settings, History, Shield, Cpu, CheckCircle2, AlertCircle, AlertTriangle, Upload, Database, ArrowLeft, RefreshCw, Clock } from 'lucide-react'
 import { useVoiceRecorder } from './hooks/useVoiceRecorder'
 import { useMemoUpload } from './hooks/useMemoUpload'
 import { useMemoStatus } from './hooks/useMemoStatus'
-import { auth, functions } from './firebase'
+import { auth, functions, db } from './firebase'
 import { onAuthStateChanged, User } from 'firebase/auth'
+import { doc, setDoc, getDoc } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { HistoryView } from './HistoryView'
 import { AuthModal } from './AuthModal'
+import { HelpModal } from './HelpModal'
 
 type CaptureMode = 'idea' | 'instruction' | 'reminder' | 'decision' | 'correction' | 'project_note'
+
+const AUTO_SUBMIT_MODES: CaptureMode[] = ['idea', 'project_note']
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [showReview, setShowReview] = useState(false)
   const [selectedMode, setSelectedMode] = useState<CaptureMode>('idea')
   const [lastMemoId, setLastMemoId] = useState<string | null>(null)
+  const [isHelpOpen, setIsHelpOpen] = useState(false)
+  const [activeView, setActiveView] = useState<'capture' | 'history' | 'diagnostics'>('capture')
+  const [clsReceipt, setClsReceipt] = useState<{ rawTurnId: string; clerkJobId: string; submittedAt: string } | null>(null)
+  const [syncError, setSyncError] = useState<{ message: string; retryable: boolean } | null>(null)
   const [syncStatus, setSyncStatus] = useState<'idle' | 'uploading' | 'success' | 'error' | 'submitted'>('idle')
   const [editedTranscript, setEditedTranscript] = useState('')
-  const [activeView, setActiveView] = useState<'capture' | 'history' | 'diagnostics'>('capture')
+  const [autoSubmitEnabled, setAutoSubmitEnabled] = useState(() => {
+    return localStorage.getItem('memlumina-auto-submit') === 'true'
+  })
 
   const { 
     isRecording, 
     audioBlob, 
     duration, 
     audioLevel, 
+    recorderError,
+    clearRecorderError,
     startRecording, 
     stopRecording, 
     resetRecording 
   } = useVoiceRecorder()
 
-  const { uploadMemo, isUploading, error: uploadError, syncOfflineMemos } = useMemoUpload()
+  const { uploadMemo, retryUpload, isUploading, error: uploadError, syncOfflineMemos } = useMemoUpload()
   const { memoData, isLoading: isMemoLoading } = useMemoStatus(lastMemoId)
 
   useEffect(() => {
     syncOfflineMemos()
   }, [syncOfflineMemos])
+
+  useEffect(() => {
+    localStorage.setItem('memlumina-auto-submit', String(autoSubmitEnabled))
+    if (user) {
+      setDoc(doc(db, `users/${user.uid}/settings/capture`), { autoSubmitEnabled }, { merge: true })
+    }
+  }, [autoSubmitEnabled, user])
+
+  useEffect(() => {
+    if (!user) return
+    const loadSettings = async () => {
+      const settingsRef = doc(db, `users/${user.uid}/settings/capture`)
+      const snap = await getDoc(settingsRef)
+      if (snap.exists()) {
+        setAutoSubmitEnabled(snap.data().autoSubmitEnabled)
+      }
+    }
+    loadSettings()
+  }, [user])
+
+  // Task 10: Auto-Ingest logic
+  useEffect(() => {
+    const isAutoSubmitMode = AUTO_SUBMIT_MODES.includes(selectedMode)
+    if (autoSubmitEnabled && isAutoSubmitMode && memoData?.status === 'transcribed' && syncStatus !== 'submitted' && syncStatus !== 'uploading') {
+      console.log('Auto-ingest triggered for memo:', lastMemoId, 'mode:', selectedMode)
+      handlePushToLedger()
+    }
+  }, [memoData?.status, autoSubmitEnabled, syncStatus, lastMemoId, selectedMode, handlePushToLedger])
 
   useEffect(() => {
     if (memoData?.transcriptText && !editedTranscript) {
@@ -73,57 +113,76 @@ function App() {
   const handleInitializeCapture = async () => {
     if (!audioBlob) return
     setSyncStatus('uploading')
+    setSyncError(null)
     const memoId = await uploadMemo(audioBlob, selectedMode)
     if (memoId) {
       setLastMemoId(memoId)
+      // Check if it's already 'recorded' (online upload succeeded) 
+      // or still 'local-only' (offline or failed upload)
       setSyncStatus('success')
     } else {
       setSyncStatus('error')
     }
   }
 
-  const handlePushToLedger = async () => {
+  const handleRetryUpload = async (memoId: string) => {
+    await retryUpload(memoId);
+  }
+
+  const handlePushToLedger = useCallback(async () => {
     if (!lastMemoId) return
     setSyncStatus('uploading')
+    setSyncError(null)
     try {
+      const isAutoSubmitMode = AUTO_SUBMIT_MODES.includes(selectedMode)
       const submitFn = httpsCallable(functions, 'submitMemoToLedger')
-      await submitFn({ 
+      const result = await submitFn({ 
         memoId: lastMemoId,
         captureMode: selectedMode,
-        reviewedByUser: true,
+        reviewedByUser: !isAutoSubmitMode, // If auto-submit mode, it bypasses manual review
         source: 'MemLumina-Voice-Capture',
         submittedFrom: 'web',
         capturedAt: new Date().toISOString(),
         editedTranscriptText: editedTranscript !== memoData?.transcriptText ? editedTranscript : undefined
       })
+      
+      const receiptData = result.data as any
+      setClsReceipt({
+        rawTurnId: receiptData.rawTurnId,
+        clerkJobId: receiptData.clerkJobId,
+        submittedAt: new Date().toISOString(),
+      })
+      
       setSyncStatus('submitted')
       localStorage.removeItem(`draft-${lastMemoId}`)
-      
-      // Auto-dismiss after success
-      setTimeout(() => {
-        setShowReview(false)
-        resetRecording()
-        setSyncStatus('idle')
-        setLastMemoId(null)
-        setEditedTranscript('')
-      }, 3000)
-    } catch (err) {
+    } catch (err: any) {
       console.error('Submission to CLS failed', err)
       setSyncStatus('error')
+      const code = err?.code || ''
+      const message = err?.message || ''
+      if (code === 'functions/unavailable' || code === 'functions/deadline-exceeded' || !navigator.onLine) {
+        setSyncError({ message: 'Network error — check your connection and try again.', retryable: true })
+      } else if (code === 'functions/failed-precondition') {
+        setSyncError({ message: 'This memo may have already been submitted or is not in the correct state.', retryable: false })
+      } else if (code === 'functions/unauthenticated') {
+        setSyncError({ message: 'Your session has expired. Please sign in again.', retryable: false })
+      } else {
+        setSyncError({ message: message || 'Submission failed unexpectedly.', retryable: true })
+      }
     }
-  }
+  }, [lastMemoId, selectedMode, editedTranscript, memoData?.transcriptText, functions])
 
   const handleSignIn = () => {
     // AuthModal handles sign in
   }
 
-  const modes: { id: CaptureMode; label: string }[] = [
-    { id: 'idea', label: 'Idea' },
-    { id: 'instruction', label: 'Instrux' },
-    { id: 'reminder', label: 'Alert' },
-    { id: 'decision', label: 'Logic' },
-    { id: 'correction', label: 'Fix' },
-    { id: 'project_note', label: 'Project' },
+  const modes: { id: CaptureMode; label: string; description: string }[] = [
+    { id: 'idea', label: 'Idea', description: 'Transient spark. Captured for high-level semantic extraction.' },
+    { id: 'instruction', label: 'Instrux', description: 'Actionable protocol. Task detection and dependency mapping enabled.' },
+    { id: 'reminder', label: 'Alert', description: 'Temporal trigger. Alerting and deadline tracking prioritized.' },
+    { id: 'decision', label: 'Logic', description: 'Logical pivot. Analytic reasoning and causal links archived.' },
+    { id: 'correction', label: 'Fix', description: 'Ledger patch. High-precision semantic replacement requested.' },
+    { id: 'project_note', label: 'Project', description: 'Structural block. Contextual grouping with existing project nodes.' },
   ]
 
   return (
@@ -136,7 +195,7 @@ function App() {
       <header className="w-full max-w-lg flex justify-between items-center z-30">
         <div className="flex flex-col">
           <div className="flex items-center space-x-2">
-            <div className="led-status led-cyan" />
+            <div className={`led-status led-cyan ${isRecording ? 'led-pulse' : ''}`} />
             <h1 className="text-xl font-outfit font-extrabold tracking-tighter uppercase">
               MemLumina <span className="text-[#00DBE7]">Capture</span>
             </h1>
@@ -155,6 +214,12 @@ function App() {
             </button>
           ) : (
             <div className="flex items-center space-x-2">
+              <button 
+                onClick={() => setIsHelpOpen(true)}
+                className="w-10 h-10 rounded-xl glass-panel flex items-center justify-center hover:bg-white/5 transition-colors"
+              >
+                <Info size={18} className="text-white/40" />
+              </button>
               <button 
                 onClick={() => setActiveView('history')}
                 className={`w-10 h-10 rounded-xl glass-panel flex items-center justify-center hover:bg-white/5 transition-colors ${activeView === 'history' ? 'bg-white/10 ring-1 ring-white/20' : ''}`}
@@ -183,6 +248,7 @@ function App() {
               setActiveView('capture')
               setEditedTranscript('') 
             }}
+            onRetryUpload={handleRetryUpload}
           />
         ) : activeView === 'diagnostics' ? (
           <div className="w-full space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-500">
@@ -212,16 +278,36 @@ function App() {
                 <span className="text-[9px] font-mono text-[#00DBE7] truncate max-w-[120px]">{user?.uid || 'N/A'}</span>
               </div>
               <div className="h-[1px] bg-white/5 w-full" />
+              
+              {/* Task 10: Auto-Submit Toggle */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <span className="text-[10px] uppercase tracking-widest text-white/60 font-bold">Auto-Submit Mode</span>
+                    <p className="text-[8px] text-white/30 uppercase">Skip review and ingest immediately</p>
+                  </div>
+                  <button 
+                    onClick={() => setAutoSubmitEnabled(!autoSubmitEnabled)}
+                    className={`w-10 h-5 rounded-full transition-colors relative ${autoSubmitEnabled ? 'bg-[#00DBE7]' : 'bg-white/10'}`}
+                  >
+                    <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${autoSubmitEnabled ? 'right-1' : 'left-1'}`} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="h-[1px] bg-white/5 w-full" />
               <div className="space-y-2">
                 <p className="text-[9px] uppercase tracking-widest text-white/20 font-black">Subsystem status</p>
                 <div className="grid grid-cols-2 gap-2">
                   <div className="p-3 bg-white/5 rounded-xl border border-white/5">
-                    <p className="text-[8px] text-white/40 uppercase mb-1">STT V2</p>
-                    <p className="text-[10px] text-green-400 font-bold">ACTIVE</p>
+                    <p className="text-[8px] text-white/40 uppercase mb-1">Transcription</p>
+                    <p className="text-[10px] text-white/60 font-bold font-mono">Google STT V1</p>
+                    <p className="text-[8px] text-white/30 mt-0.5">longRunningRecognize / default</p>
                   </div>
                   <div className="p-3 bg-white/5 rounded-xl border border-white/5">
-                    <p className="text-[8px] text-white/40 uppercase mb-1">Gemini 1.5</p>
-                    <p className="text-[10px] text-green-400 font-bold">ACTIVE</p>
+                    <p className="text-[8px] text-white/40 uppercase mb-1">Transcript Cleanup</p>
+                    <p className="text-[10px] text-white/60 font-bold font-mono">Gemini 1.5 Flash</p>
+                    <p className="text-[8px] text-white/30 mt-0.5">gemini-1.5-flash-002</p>
                   </div>
                 </div>
               </div>
@@ -235,18 +321,40 @@ function App() {
                 {/* Multi-layered Pulsing Rings */}
                 {isRecording && (
                   <>
+                    {/* Dynamic Audio Ripples */}
+                    {[0, 1, 2].map((i) => (
+                      <div 
+                        key={i}
+                        className="absolute inset-0 rounded-full border border-[#00DBE7] pointer-events-none"
+                        style={{ 
+                          opacity: (0.4 - i * 0.1) * (audioLevel / 60 + 0.2),
+                          transform: `scale(${1 + (audioLevel / 50) * (i + 1) * 0.5})`,
+                          transition: 'transform 80ms ease-out, opacity 80ms ease-out'
+                        }}
+                      />
+                    ))}
+                    
+                    {/* Outer Ambient Glow */}
+                    <div 
+                      className="absolute inset-[-60px] rounded-full bg-[#00DBE7]/5 blur-3xl pointer-events-none"
+                      style={{ 
+                        transform: `scale(${1 + audioLevel / 60})`,
+                        opacity: 0.1 + (audioLevel / 150)
+                      }}
+                    />
+
                     <div className="recorder-ring" />
                     <div className="recorder-ring-delayed" />
-                    <div 
-                      className="absolute inset-[-40px] rounded-full border border-[#00DBE7]/10 blur-xl opacity-50"
-                      style={{ transform: `scale(${1 + audioLevel / 100})` }}
-                    />
                   </>
                 )}
                 
                 <button 
                   disabled={!user}
                   className={`btn-record ${isRecording ? 'recording' : ''} ${!user ? 'opacity-30 grayscale' : ''}`}
+                  style={isRecording ? { 
+                    transform: `scale(${1.05 + audioLevel / 300})`,
+                    boxShadow: `0 0 ${40 + audioLevel * 2}px rgba(0, 219, 231, ${0.4 + audioLevel / 50})`
+                  } : {}}
                 >
                   {isRecording ? (
                     <Square size={36} fill="#0B0B0C" className="text-[#0B0B0C]" />
@@ -256,7 +364,40 @@ function App() {
                 </button>
               </div>
 
+              {/* Recorder Error Card */}
+              {recorderError && (
+                <div className="w-full glass-panel rounded-2xl p-5 border border-red-500/20 bg-red-500/5 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start space-x-3">
+                      <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
+                      <div className="space-y-1.5">
+                        <span className="text-[10px] uppercase font-bold tracking-widest text-red-400 block">
+                          {recorderError.code === 'permission_denied' ? 'Microphone Blocked' :
+                           recorderError.code === 'device_unavailable' ? 'No Microphone Found' :
+                           recorderError.code === 'format_unsupported' ? 'Unsupported Format' :
+                           'Recording Failed'}
+                        </span>
+                        <p className="text-xs text-white/50 leading-relaxed">{recorderError.message}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={clearRecorderError}
+                      className="text-[9px] text-white/30 uppercase tracking-widest hover:text-white/60 transition-colors shrink-0 ml-3"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="text-center space-y-2">
+                {isRecording && (
+                  <div className="flex items-center justify-center space-x-2 mb-4">
+                    <span className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-[#00DBE7] animate-pulse">
+                      Mode: {selectedMode}
+                    </span>
+                  </div>
+                )}
                 <div className="text-7xl font-outfit font-black tabular-nums tracking-tighter glow-text-cyan">
                   {Math.floor(duration / 60).toString().padStart(2, '0')}:{(duration % 60).toString().padStart(2, '0')}
                 </div>
@@ -299,8 +440,12 @@ function App() {
             <div className="glass-panel rounded-2xl overflow-hidden group">
               <div className="p-4 border-b border-white/5 bg-white/5 flex justify-between items-center">
                 <div className="flex items-center space-x-2">
-                  {memoData?.status === 'transcribed' || memoData?.status === 'processed' ? (
+                  {memoData?.status === 'processed' ? (
                     <CheckCircle2 size={14} className="text-[#00FF94]" />
+                  ) : memoData?.status === 'submitted' ? (
+                    <Upload size={14} className="text-[#00DBE7] animate-pulse" />
+                  ) : memoData?.status === 'transcribed' ? (
+                    <AlertTriangle size={14} className="text-amber-400" />
                   ) : memoData?.status === 'error' ? (
                     <AlertCircle size={14} className="text-red-400" />
                   ) : (
@@ -308,11 +453,18 @@ function App() {
                   )}
                   <span className="text-[10px] uppercase tracking-widest font-black text-white/50">
                     {memoData?.status === 'transcribing' ? 'Neural Processing' : 
-                     memoData?.status === 'transcribed' ? 'Intelligence Captured' :
+                     memoData?.status === 'transcribed' ? 'Transcript Ready — Awaiting Ledger Ingestion' :
+                     memoData?.status === 'submitted' ? 'Ingesting into Cognitive Ledger' :
+                     memoData?.status === 'processed' ? 'Accepted by Cognitive Ledger' :
                      memoData?.status === 'error' ? 'Processing Error' : 'Stream Ready'}
                   </span>
                 </div>
-                <span className="text-[9px] font-mono text-[#EBB2FF]/70 bg-[#EBB2FF]/10 px-2 py-0.5 rounded uppercase">
+                <span className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase ${
+                  memoData?.status === 'transcribed' ? 'text-amber-400/70 bg-amber-400/10' :
+                  memoData?.status === 'submitted' ? 'text-[#00DBE7]/70 bg-[#00DBE7]/10' :
+                  memoData?.status === 'processed' ? 'text-[#00FF94]/70 bg-[#00FF94]/10' :
+                  'text-[#EBB2FF]/70 bg-[#EBB2FF]/10'
+                }`}>
                   {memoData?.status || 'awaiting_sync'}
                 </span>
               </div>
@@ -329,17 +481,19 @@ function App() {
                       <Activity size={32} className="text-[#00DBE7] animate-pulse" />
                       <div className="absolute inset-0 bg-[#00DBE7]/20 blur-xl animate-pulse" />
                     </div>
-                    <p className="text-[10px] uppercase tracking-widest text-white/40 font-black animate-bounce">Inverting Audio Phase / Extracting Semantics...</p>
+                    <p className="text-[10px] uppercase tracking-widest text-white/40 font-black animate-bounce">
+                      {memoData?.status === 'uploading' ? 'Uploading to Cognitive Cloud...' : 'Inverting Audio Phase / Extracting Semantics...'}
+                    </p>
                   </div>
                 )}
 
-                {lastMemoId && !navigator.onLine && !memoData && (
+                {lastMemoId && (memoData?.status === 'local-only' || (!navigator.onLine && !memoData)) && (
                   <div className="flex flex-col items-center justify-center space-y-4 py-8">
                     <div className="relative">
                       <Database size={32} className="text-yellow-500" />
                       <div className="absolute inset-0 bg-yellow-500/20 blur-xl animate-pulse" />
                     </div>
-                    <p className="text-[10px] uppercase tracking-widest text-yellow-500/70 font-black animate-bounce">Saved to Offline Queue...</p>
+                    <p className="text-[10px] uppercase tracking-widest text-yellow-500/70 font-black animate-bounce">Saved to Local Vault / Pending Sync...</p>
                   </div>
                 )}
 
@@ -361,10 +515,55 @@ function App() {
                       }`}
                       placeholder="Transcript is empty. You can write your memo here..."
                     />
+                    {memoData.status === 'transcribed' && (
+                      <div className="flex items-start space-x-3 text-amber-400 bg-amber-400/10 p-4 rounded-lg border border-amber-400/20 animate-in slide-in-from-bottom-2">
+                        <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+                        <div className="space-y-1">
+                          <span className="text-xs uppercase font-bold tracking-widest block">Not Yet In Memory</span>
+                          <span className="text-[10px] text-amber-400/70 tracking-wide block">
+                            This transcript is ready for review. Tap "Verify & Ingest" below to send it to your Cognitive Ledger.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {memoData.status === 'submitted' && (
+                      <div className="flex items-center space-x-2 text-[#00DBE7] bg-[#00DBE7]/10 p-3 rounded-lg border border-[#00DBE7]/20 animate-in slide-in-from-bottom-2">
+                        <Upload size={16} className="animate-pulse" />
+                        <span className="text-xs uppercase font-bold tracking-widest">Ingesting into Cognitive Ledger...</span>
+                      </div>
+                    )}
                     {memoData.status === 'processed' && (
-                      <div className="flex items-center space-x-2 text-[#00FF94] bg-[#00FF94]/10 p-3 rounded-lg border border-[#00FF94]/20 animate-in slide-in-from-bottom-2">
-                        <CheckCircle2 size={16} />
-                        <span className="text-xs uppercase font-bold tracking-widest">Receipt: Accepted by Cognitive Ledger</span>
+                      <div className="text-[#00FF94] bg-[#00FF94]/10 p-4 rounded-lg border border-[#00FF94]/20 receipt-slide-in space-y-3">
+                        <div className="flex items-center space-x-2">
+                          <CheckCircle2 size={16} />
+                          <span className="text-xs uppercase font-bold tracking-widest">Accepted by Cognitive Ledger</span>
+                        </div>
+                        {(clsReceipt || memoData.rawTurnId) && (
+                          <div className="grid grid-cols-2 gap-2 text-[9px] font-mono">
+                            <div>
+                              <span className="text-[#00FF94]/50 uppercase block">Raw Turn</span>
+                              <span className="text-[#00FF94]/80 truncate block">{clsReceipt?.rawTurnId || memoData.rawTurnId}</span>
+                            </div>
+                            <div>
+                              <span className="text-[#00FF94]/50 uppercase block">Clerk Job</span>
+                              <span className="text-[#00FF94]/80 truncate block">{clsReceipt?.clerkJobId || memoData.clerkJobId}</span>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="text-[#00FF94]/50 uppercase block">Submitted</span>
+                              <span className="text-[#00FF94]/80">
+                                {clsReceipt?.submittedAt || (memoData.submittedAt?.toDate ? new Date(memoData.submittedAt.toDate()).toLocaleString() : 'Recently')}
+                              </span>
+                            </div>
+                            {memoData.audioRetainedUntil && (
+                              <div className="col-span-2 pt-1 border-t border-[#00FF94]/10">
+                                <span className="text-[#00FF94]/50 uppercase block">Audio Purge</span>
+                                <span className="text-[#00FF94]/80">
+                                  {memoData.audioRetainedUntil.toDate ? new Date(memoData.audioRetainedUntil.toDate()).toLocaleString() : 'Scheduled'}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -389,6 +588,12 @@ function App() {
                   </button>
                 ))}
               </div>
+              {/* Mode Description Overlay/Card */}
+              <div className="p-3 bg-white/5 rounded-xl border border-white/5 animate-in fade-in slide-in-from-top-2 duration-300">
+                <p className="text-[10px] text-[#00DBE7]/70 font-medium leading-relaxed italic">
+                  {modes.find(m => m.id === selectedMode)?.description}
+                </p>
+              </div>
             </div>
 
             {/* Action Bar */}
@@ -403,6 +608,8 @@ function App() {
                   setEditedTranscript('')
                   setLastMemoId(null)
                   setSyncStatus('idle')
+                  setClsReceipt(null)
+                  setSyncError(null)
                 }}
                 className="flex-1 py-4 rounded-xl border border-white/5 text-white/40 font-bold text-[11px] uppercase tracking-widest hover:bg-white/5 transition-all"
               >
@@ -411,8 +618,8 @@ function App() {
               
               {(memoData?.status !== 'submitted' && memoData?.status !== 'processed') && (
                 <button 
-                  onClick={memoData?.status === 'transcribed' ? handlePushToLedger : handleInitializeCapture}
-                  disabled={syncStatus === 'uploading' || (syncStatus === 'success' && memoData?.status !== 'transcribed') || syncStatus === 'submitted'}
+                  onClick={memoData?.status === 'transcribed' ? handlePushToLedger : memoData?.status === 'local-only' ? () => handleRetryUpload(lastMemoId!) : handleInitializeCapture}
+                  disabled={syncStatus === 'uploading' || (syncStatus === 'success' && memoData?.status !== 'transcribed' && memoData?.status !== 'local-only') || syncStatus === 'submitted'}
                   className="flex-[2] py-4 bg-gradient-to-r from-[#00DBE7] to-[#EBB2FF] text-[#0B0B0C] rounded-xl font-black text-[11px] uppercase tracking-widest flex items-center justify-center space-x-2 shadow-2xl shadow-[#00DBE7]/20 hover:opacity-90 transition-all active:scale-[0.98] disabled:opacity-50"
                 >
                   {syncStatus === 'uploading' ? (
@@ -421,21 +628,49 @@ function App() {
                     <CheckCircle2 size={16} />
                   ) : memoData?.status === 'transcribed' ? (
                     <Cpu size={16} />
+                  ) : memoData?.status === 'local-only' ? (
+                    <RefreshCw size={16} />
                   ) : (
                     <Send size={16} />
                   )}
                   <span>
                     {syncStatus === 'uploading' ? 'Processing...' : 
                      syncStatus === 'submitted' ? 'Injected to CLS' : 
-                     memoData?.status === 'transcribed' ? 'Verify & Ingest' : 'Initialize Capture'}
+                     memoData?.status === 'transcribed' ? 'Verify & Ingest' : 
+                     memoData?.status === 'local-only' ? 'Retry Upload' : 'Initialize Capture'}
                   </span>
                 </button>
               )}
             </div>
+
+            {memoData?.status === 'local-only' && (
+              <div className="flex items-center justify-center space-x-2 text-yellow-500 bg-yellow-500/10 p-3 rounded-lg border border-yellow-500/20 animate-in slide-in-from-bottom-2">
+                <Database size={16} />
+                <span className="text-[10px] uppercase font-bold tracking-widest">Signal Stored Locally. Sync required for analysis.</span>
+              </div>
+            )}
             
             {(uploadError || syncStatus === 'error') && (
-              <div className="p-3 rounded-lg border border-red-500/20 bg-red-500/5 text-red-400 text-[10px] text-center uppercase tracking-widest font-black">
-                {uploadError || 'Sync failed: Connection Interrupted'}
+              <div className="p-4 rounded-lg border border-red-500/20 bg-red-500/5 space-y-3">
+                <div className="flex items-start space-x-2">
+                  <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <p className="text-red-400 text-[10px] uppercase tracking-widest font-black">
+                      {uploadError ? 'Upload Failed' : 'Submission Failed'}
+                    </p>
+                    <p className="text-red-400/70 text-[10px] leading-relaxed">
+                      {syncError?.message || uploadError || 'An unexpected error occurred.'}
+                    </p>
+                  </div>
+                </div>
+                {syncError?.retryable && memoData?.status === 'transcribed' && (
+                  <button
+                    onClick={handlePushToLedger}
+                    className="w-full py-3 rounded-lg border border-red-500/20 bg-red-500/10 text-red-400 text-[10px] uppercase tracking-widest font-bold hover:bg-red-500/20 transition-all"
+                  >
+                    Retry Submission
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -456,6 +691,7 @@ function App() {
         </div>
         <div className="text-[8px] font-mono text-white/10 uppercase tracking-[0.5em]">System Secure // Session Scoped</div>
       </footer>
+      <HelpModal isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
     </div>
   )
 }

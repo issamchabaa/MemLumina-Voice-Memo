@@ -3,14 +3,19 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { db, auth } from '../firebase';
 
 export interface MemoStatus {
-  status: 'uploading' | 'recorded' | 'transcribing' | 'transcribed' | 'error' | 'submitted' | 'processed';
+  status: 'local-only' | 'uploading' | 'recorded' | 'transcribing' | 'transcribed' | 'error' | 'submitted' | 'processed';
   transcriptText?: string;
   rawTranscriptText?: string;
   transcriptProvider?: string;
   transcriptModel?: string;
   transcriptLanguage?: string;
   transcriptConfidence?: number | null;
+  rawTurnId?: string;
+  clerkJobId?: string;
+  submittedAt?: any;
   errorDetails?: string;
+  captureMode?: string;
+  audioRetainedUntil?: any;
 }
 
 export const useMemoStatus = (memoId: string | null) => {

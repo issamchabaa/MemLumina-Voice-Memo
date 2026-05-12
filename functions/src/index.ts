@@ -202,6 +202,10 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
     sequenceNumber: 1,
     messages: [
       {
+        role: 'system',
+        content: `SYSTEM: ${captureModeValue.toUpperCase()} voice ingestion protocol active. This input is a transcribed voice memo. Extract entities and update cognitive ledger according to the specified capture mode.`,
+      },
+      {
         role: 'user',
         content: finalTranscriptText,
       }
@@ -267,6 +271,7 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
     
     const memoUpdateData: any = {
       status: 'submitted',
+      rawTurnId: rawTurnId,
       clerkJobId: clerkJob.id,
       transcriptProvider,
       transcriptModel,
@@ -323,30 +328,16 @@ export const onClerkJobUpdated = functions.firestore.document('users/{userId}/cl
         const memoRef = db.collection(`users/${newValue.userId}/voice_memos`).doc(memoId);
         const memoSnap = await memoRef.get();
         
-        await memoRef.update({
-          status: 'processed',
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        
-        // Retention policy: Clean up raw audio once successfully processed by CLS
-        if (memoSnap.exists) {
-          const memoData = memoSnap.data();
-          if (memoData?.storagePath) {
-            try {
-              const bucket = admin.storage().bucket(); // gets default bucket
-              await bucket.file(memoData.storagePath).delete();
-              console.log(`Successfully cleaned up raw audio: ${memoData.storagePath}`);
-              
-              // Also remove it from firestore doc to reflect it's gone
-              await memoRef.update({
-                audioURL: admin.firestore.FieldValue.delete(),
-                storagePath: admin.firestore.FieldValue.delete(),
-              });
-            } catch (storageError) {
-              console.error(`Failed to delete raw audio ${memoData.storagePath}:`, storageError);
-            }
-          }
-        }
+          await memoRef.update({
+            status: 'processed',
+            rawTurnId: newValue.rawTurnId,
+            clerkJobId: context.params.jobId,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            // Retain audio for 14 days to allow quality verification and reprocessing
+            audioRetainedUntil: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+          });
+
+          console.log(`Memo ${memoId} marked as processed. RawTurn: ${newValue.rawTurnId}, ClerkJob: ${context.params.jobId}. Audio retained until ${new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()}.`);
       } catch (error) {
         console.error(`Failed to update memo ${memoId} status to 'processed':`, error);
       }

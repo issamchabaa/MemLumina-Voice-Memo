@@ -5,7 +5,9 @@ import { db, auth } from '../firebase'
 export interface VoiceMemo {
   id: string
   userId: string
-  status: 'recorded' | 'transcribing' | 'transcribed' | 'submitted' | 'processed' | 'error'
+  status: 'local-only' | 'uploading' | 'recorded' | 'transcribing' | 'transcribed' | 'submitted' | 'processed' | 'error'
+  storageState?: 'local' | 'uploading' | 'stored'
+  audioStaged?: boolean
   transcriptText?: string
   rawTranscriptText?: string
   errorDetails?: string
