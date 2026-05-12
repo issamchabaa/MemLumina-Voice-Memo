@@ -153,7 +153,7 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
     throw new functions.https.HttpsError('unauthenticated', 'The function must be called while authenticated.');
   }
 
-  const { memoId, captureMode, reviewedByUser, source = 'MemLumina-Voice-Capture', submittedFrom = 'web', capturedAt, editedTranscriptText } = data;
+  const { memoId, reviewedByUser, source = 'MemLumina-Voice-Capture', submittedFrom = 'web', capturedAt, editedTranscriptText } = data;
   if (!memoId) {
     throw new functions.https.HttpsError('invalid-argument', 'The function must be called with a memoId.');
   }
@@ -187,10 +187,9 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
     ? memo.createdAt.toDate().toISOString()
     : String(memo.createdAt || new Date().toISOString());
   const capturedAtValue = capturedAt || memoCreatedAt;
-  const captureModeValue = captureMode || memo.captureMode || memo.mode || 'idea';
 
   const contentHash = createHash('sha256')
-    .update(`${memoId}:${finalTranscriptText}:${captureModeValue}:${capturedAtValue}:${submittedAt}`)
+    .update(`${memoId}:${finalTranscriptText}:${capturedAtValue}:${submittedAt}`)
     .digest('hex');
 
   const rawTurn: RawTurn = {
@@ -203,7 +202,7 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
     messages: [
       {
         role: 'system',
-        content: `SYSTEM: ${captureModeValue.toUpperCase()} voice ingestion protocol active. This input is a transcribed voice memo. Extract entities and update cognitive ledger according to the specified capture mode.`,
+        content: `SYSTEM: VOICE CAPTURE protocol active. This input is a transcribed voice memo. Extract entities and update cognitive ledger appropriately.`,
       },
       {
         role: 'user',
@@ -225,7 +224,6 @@ export const submitMemoToLedger = functions.https.onCall(async (data, context) =
     metadata: {
       source,
       memoId,
-      captureMode: captureModeValue,
       audioStoragePath: memo.storagePath || '',
       transcriptText: finalTranscriptText,
       transcriptProvider,

@@ -1,4 +1,4 @@
-import { useMemoHistory } from './hooks/useMemoHistory'
+import { useMemoHistory, VoiceMemo } from './hooks/useMemoHistory'
 import { CheckCircle2, AlertCircle, AlertTriangle, Clock, ArrowLeft, Cpu, Trash2, ChevronRight, Database, RefreshCw, Upload } from 'lucide-react'
 
 interface HistoryViewProps {
@@ -13,7 +13,12 @@ export function HistoryView({ onBack, onSelectMemo, onRetryUpload }: HistoryView
   // Group memos into operational sections
   const needsAttention = memos.filter(m => ['recorded', 'transcribed', 'error', 'local-only'].includes(m.status))
   const inProgress = memos.filter(m => ['transcribing', 'uploading', 'submitted'].includes(m.status))
-  const completed = memos.filter(m => m.status === 'processed')
+  const completed = memos.filter(m => {
+    if (m.status !== 'processed') return false
+    // Exit Strategy: Hide processed memos after 24 hours
+    if (!m.updatedAt || !m.updatedAt.toDate) return true
+    return (Date.now() - m.updatedAt.toDate().getTime()) < 24 * 60 * 60 * 1000
+  })
 
   const getActionHint = (status: string) => {
     switch (status) {
@@ -63,11 +68,7 @@ export function HistoryView({ onBack, onSelectMemo, onRetryUpload }: HistoryView
           <div className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase border ${getStatusColor(memo.status)}`}>
             {getStatusLabel(memo.status)}
           </div>
-          {memo.captureMode && (
-            <div className="text-[9px] font-mono bg-white/5 text-white/40 px-2 py-0.5 rounded uppercase border border-white/5">
-              {memo.captureMode}
-            </div>
-          )}
+
         </div>
         <div className="flex items-center space-x-2">
           {memo.status === 'local-only' && onRetryUpload && (

@@ -11,14 +11,12 @@ import { HistoryView } from './HistoryView'
 import { AuthModal } from './AuthModal'
 import { HelpModal } from './HelpModal'
 
-type CaptureMode = 'idea' | 'instruction' | 'reminder' | 'decision' | 'correction' | 'project_note'
+// Capture modes removed as per V2 specification
 
-const AUTO_SUBMIT_MODES: CaptureMode[] = ['idea', 'project_note']
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [showReview, setShowReview] = useState(false)
-  const [selectedMode, setSelectedMode] = useState<CaptureMode>('idea')
   const [lastMemoId, setLastMemoId] = useState<string | null>(null)
   const [isHelpOpen, setIsHelpOpen] = useState(false)
   const [activeView, setActiveView] = useState<'capture' | 'history' | 'diagnostics'>('capture')
@@ -29,6 +27,7 @@ function App() {
   const [autoSubmitEnabled, setAutoSubmitEnabled] = useState(() => {
     return localStorage.getItem('memlumina-auto-submit') === 'true'
   })
+  const [isOnline, setIsOnline] = useState(navigator.onLine)
 
   const { 
     isRecording, 
@@ -45,9 +44,61 @@ function App() {
   const { uploadMemo, retryUpload, isUploading, error: uploadError, syncOfflineMemos } = useMemoUpload()
   const { memoData, isLoading: isMemoLoading } = useMemoStatus(lastMemoId)
 
+  const handlePushToLedger = useCallback(async () => {
+    if (!lastMemoId) return
+    setSyncStatus('uploading')
+    setSyncError(null)
+    try {
+      const submitFn = httpsCallable(functions, 'submitMemoToLedger')
+      const result = await submitFn({ 
+        memoId: lastMemoId,
+        reviewedByUser: !autoSubmitEnabled, // If auto-submit is on, it bypasses manual review
+        source: 'MemLumina-Voice-Capture',
+        submittedFrom: 'web',
+        capturedAt: new Date().toISOString(),
+        editedTranscriptText: editedTranscript !== memoData?.transcriptText ? editedTranscript : undefined
+      })
+      
+      const receiptData = result.data as any
+      setClsReceipt({
+        rawTurnId: receiptData.rawTurnId,
+        clerkJobId: receiptData.clerkJobId,
+        submittedAt: new Date().toISOString(),
+      })
+      
+      setSyncStatus('submitted')
+      localStorage.removeItem(`draft-${lastMemoId}`)
+    } catch (err: any) {
+      console.error('Submission to CLS failed', err)
+      setSyncStatus('error')
+      const code = err?.code || ''
+      const message = err?.message || ''
+      if (code === 'functions/unavailable' || code === 'functions/deadline-exceeded' || !navigator.onLine) {
+        setSyncError({ message: 'Network error — check your connection and try again.', retryable: true })
+      } else if (code === 'functions/failed-precondition') {
+        setSyncError({ message: 'This memo may have already been submitted or is not in the correct state.', retryable: false })
+      } else if (code === 'functions/unauthenticated') {
+        setSyncError({ message: 'Your session has expired. Please sign in again.', retryable: false })
+      } else {
+        setSyncError({ message: message || 'Submission failed unexpectedly.', retryable: true })
+      }
+    }
+  }, [lastMemoId, autoSubmitEnabled, editedTranscript, memoData?.transcriptText, functions])
+
   useEffect(() => {
     syncOfflineMemos()
   }, [syncOfflineMemos])
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true)
+    const handleOffline = () => setIsOnline(false)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
+  }, [])
 
   useEffect(() => {
     localStorage.setItem('memlumina-auto-submit', String(autoSubmitEnabled))
@@ -68,14 +119,13 @@ function App() {
     loadSettings()
   }, [user])
 
-  // Task 10: Auto-Ingest logic
+  // Auto-Ingest logic
   useEffect(() => {
-    const isAutoSubmitMode = AUTO_SUBMIT_MODES.includes(selectedMode)
-    if (autoSubmitEnabled && isAutoSubmitMode && memoData?.status === 'transcribed' && syncStatus !== 'submitted' && syncStatus !== 'uploading') {
-      console.log('Auto-ingest triggered for memo:', lastMemoId, 'mode:', selectedMode)
+    if (autoSubmitEnabled && memoData?.status === 'transcribed' && syncStatus !== 'submitted' && syncStatus !== 'uploading') {
+      console.log('Auto-ingest triggered for memo:', lastMemoId)
       handlePushToLedger()
     }
-  }, [memoData?.status, autoSubmitEnabled, syncStatus, lastMemoId, selectedMode, handlePushToLedger])
+  }, [memoData?.status, autoSubmitEnabled, syncStatus, lastMemoId, handlePushToLedger])
 
   useEffect(() => {
     if (memoData?.transcriptText && !editedTranscript) {
@@ -114,7 +164,7 @@ function App() {
     if (!audioBlob) return
     setSyncStatus('uploading')
     setSyncError(null)
-    const memoId = await uploadMemo(audioBlob, selectedMode)
+    const memoId = await uploadMemo(audioBlob)
     if (memoId) {
       setLastMemoId(memoId)
       // Check if it's already 'recorded' (online upload succeeded) 
@@ -129,64 +179,18 @@ function App() {
     await retryUpload(memoId);
   }
 
-  const handlePushToLedger = useCallback(async () => {
-    if (!lastMemoId) return
-    setSyncStatus('uploading')
-    setSyncError(null)
-    try {
-      const isAutoSubmitMode = AUTO_SUBMIT_MODES.includes(selectedMode)
-      const submitFn = httpsCallable(functions, 'submitMemoToLedger')
-      const result = await submitFn({ 
-        memoId: lastMemoId,
-        captureMode: selectedMode,
-        reviewedByUser: !isAutoSubmitMode, // If auto-submit mode, it bypasses manual review
-        source: 'MemLumina-Voice-Capture',
-        submittedFrom: 'web',
-        capturedAt: new Date().toISOString(),
-        editedTranscriptText: editedTranscript !== memoData?.transcriptText ? editedTranscript : undefined
-      })
-      
-      const receiptData = result.data as any
-      setClsReceipt({
-        rawTurnId: receiptData.rawTurnId,
-        clerkJobId: receiptData.clerkJobId,
-        submittedAt: new Date().toISOString(),
-      })
-      
-      setSyncStatus('submitted')
-      localStorage.removeItem(`draft-${lastMemoId}`)
-    } catch (err: any) {
-      console.error('Submission to CLS failed', err)
-      setSyncStatus('error')
-      const code = err?.code || ''
-      const message = err?.message || ''
-      if (code === 'functions/unavailable' || code === 'functions/deadline-exceeded' || !navigator.onLine) {
-        setSyncError({ message: 'Network error — check your connection and try again.', retryable: true })
-      } else if (code === 'functions/failed-precondition') {
-        setSyncError({ message: 'This memo may have already been submitted or is not in the correct state.', retryable: false })
-      } else if (code === 'functions/unauthenticated') {
-        setSyncError({ message: 'Your session has expired. Please sign in again.', retryable: false })
-      } else {
-        setSyncError({ message: message || 'Submission failed unexpectedly.', retryable: true })
-      }
-    }
-  }, [lastMemoId, selectedMode, editedTranscript, memoData?.transcriptText, functions])
-
   const handleSignIn = () => {
     // AuthModal handles sign in
   }
 
-  const modes: { id: CaptureMode; label: string; description: string }[] = [
-    { id: 'idea', label: 'Idea', description: 'Transient spark. Captured for high-level semantic extraction.' },
-    { id: 'instruction', label: 'Instrux', description: 'Actionable protocol. Task detection and dependency mapping enabled.' },
-    { id: 'reminder', label: 'Alert', description: 'Temporal trigger. Alerting and deadline tracking prioritized.' },
-    { id: 'decision', label: 'Logic', description: 'Logical pivot. Analytic reasoning and causal links archived.' },
-    { id: 'correction', label: 'Fix', description: 'Ledger patch. High-precision semantic replacement requested.' },
-    { id: 'project_note', label: 'Project', description: 'Structural block. Contextual grouping with existing project nodes.' },
-  ]
-
   return (
     <div className="min-h-screen flex flex-col items-center justify-between p-6 md:p-10 bg-[#0B0B0C] text-[#F8FAF7] relative overflow-hidden">
+      {!isOnline && (
+        <div className="absolute top-0 left-0 w-full bg-yellow-500/90 text-[#0B0B0C] py-2 px-4 z-50 flex items-center justify-center space-x-2 shadow-lg shadow-yellow-500/20">
+          <Database size={14} />
+          <span className="text-[10px] font-black uppercase tracking-widest">Offline Vault Active • Captures stored locally</span>
+        </div>
+      )}
       {!user && <AuthModal />}
       {/* Ambient Effects */}
       <div className="ambient-glow" />
@@ -391,13 +395,6 @@ function App() {
               )}
 
               <div className="text-center space-y-2">
-                {isRecording && (
-                  <div className="flex items-center justify-center space-x-2 mb-4">
-                    <span className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-[#00DBE7] animate-pulse">
-                      Mode: {selectedMode}
-                    </span>
-                  </div>
-                )}
                 <div className="text-7xl font-outfit font-black tabular-nums tracking-tighter glow-text-cyan">
                   {Math.floor(duration / 60).toString().padStart(2, '0')}:{(duration % 60).toString().padStart(2, '0')}
                 </div>
@@ -568,31 +565,6 @@ function App() {
                     )}
                   </div>
                 )}
-              </div>
-            </div>
-
-            {/* Classification Modes */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between px-1">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-black text-white/30">Schema Classification</p>
-                <Info size={12} className="text-white/20" />
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                {modes.map((mode) => (
-                  <button
-                    key={mode.id}
-                    onClick={() => setSelectedMode(mode.id)}
-                    className={`mode-pill ${selectedMode === mode.id ? 'active' : ''}`}
-                  >
-                    {mode.label}
-                  </button>
-                ))}
-              </div>
-              {/* Mode Description Overlay/Card */}
-              <div className="p-3 bg-white/5 rounded-xl border border-white/5 animate-in fade-in slide-in-from-top-2 duration-300">
-                <p className="text-[10px] text-[#00DBE7]/70 font-medium leading-relaxed italic">
-                  {modes.find(m => m.id === selectedMode)?.description}
-                </p>
               </div>
             </div>
 

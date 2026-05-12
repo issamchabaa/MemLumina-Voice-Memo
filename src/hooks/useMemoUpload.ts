@@ -8,7 +8,7 @@ export const useMemoUpload = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const performUpload = async (userId: string, memoId: string, blob: Blob, captureMode: string) => {
+  const performUpload = async (userId: string, memoId: string, blob: Blob) => {
     // 1. Update Firestore document to 'uploading'
     const voiceMemosRef = collection(db, `users/${userId}/voice_memos`);
     const memoDocRef = doc(voiceMemosRef, memoId);
@@ -45,11 +45,11 @@ export const useMemoUpload = () => {
     
     for (const key of memoKeys) {
       const data = await get(key);
-      if (data && data.userId && data.memoId && data.blob && data.captureMode) {
+      if (data && data.userId && data.memoId && data.blob) {
         try {
           // Check if it's already uploaded in Firestore to avoid redundant uploads
           // (Though performUpload updates it anyway, it's safer)
-          await performUpload(data.userId, data.memoId, data.blob, data.captureMode);
+          await performUpload(data.userId, data.memoId, data.blob);
           
           // Task 4: Retain until safe handoff. For now, we clear after successful upload 
           // to prevent endless retries, but we could keep it longer if we track ingestion.
@@ -68,7 +68,7 @@ export const useMemoUpload = () => {
     return () => window.removeEventListener('online', syncOfflineMemos);
   }, [syncOfflineMemos]);
 
-  const uploadMemo = useCallback(async (blob: Blob, captureMode: string) => {
+  const uploadMemo = useCallback(async (blob: Blob) => {
     const user = auth.currentUser;
     if (!user) {
       setError('User not authenticated');
@@ -88,7 +88,6 @@ export const useMemoUpload = () => {
         userId: user.uid,
         memoId,
         blob,
-        captureMode,
         timestamp: Date.now()
       });
     } catch (err) {
@@ -109,7 +108,6 @@ export const useMemoUpload = () => {
         status: 'local-only',
         storageState: 'local',
         audioStaged: true,
-        captureMode,
         audioContentType: blob.type,
         audioRetainedUntil: retentionDate,
         createdAt: serverTimestamp(),
@@ -123,7 +121,7 @@ export const useMemoUpload = () => {
     // 3. STAGE 3: Attempt upload if online
     if (navigator.onLine) {
       try {
-        await performUpload(user.uid, memoId, blob, captureMode);
+        await performUpload(user.uid, memoId, blob);
         // If successful, we can remove from IDB or keep it for Task 4
         await del(`offline-memo-${memoId}`);
       } catch (err) {
@@ -144,7 +142,7 @@ export const useMemoUpload = () => {
 
     const key = `offline-memo-${memoId}`;
     const data = await get(key);
-    if (!data || !data.userId || !data.blob || !data.captureMode) {
+    if (!data || !data.userId || !data.blob) {
       setError('Staged audio not found or corrupted.');
       return;
     }
@@ -153,7 +151,7 @@ export const useMemoUpload = () => {
     setError(null);
 
     try {
-      await performUpload(data.userId, memoId, data.blob, data.captureMode);
+      await performUpload(data.userId, memoId, data.blob);
       await del(key);
       setIsUploading(false);
     } catch (err: any) {

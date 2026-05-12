@@ -13,7 +13,7 @@ export interface VoiceMemo {
   errorDetails?: string
   createdAt: any
   updatedAt: any
-  captureMode?: string
+  audioRetainedUntil?: any
 }
 
 export function useMemoHistory(limitCount: number = 20) {

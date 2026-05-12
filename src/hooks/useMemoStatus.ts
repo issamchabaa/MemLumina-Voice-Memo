@@ -14,7 +14,6 @@ export interface MemoStatus {
   clerkJobId?: string;
   submittedAt?: any;
   errorDetails?: string;
-  captureMode?: string;
   audioRetainedUntil?: any;
 }
 
