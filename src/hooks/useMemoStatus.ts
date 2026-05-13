@@ -18,26 +18,27 @@ export interface MemoStatus {
 }
 
 export const useMemoStatus = (memoId: string | null) => {
-  const [memoData, setMemoData] = useState<MemoStatus | null>(null);
+  const [state, setState] = useState<{ id: string | null, data: MemoStatus | null }>({ id: null, data: null });
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     if (!memoId) {
-      setMemoData(null);
+      setState({ id: null, data: null });
       setIsLoading(false);
       return;
     }
 
     setIsLoading(true);
+    setState({ id: memoId, data: null }); // Clear previous memo data to prevent stale state bleed
     const docRef = doc(db, `users/${auth.currentUser?.uid}/voice_memos`, memoId);
 
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data() as MemoStatus;
-        setMemoData(data);
+        setState({ id: memoId, data });
       } else {
         console.warn(`Memo with ID ${memoId} not found.`);
-        setMemoData(null);
+        setState({ id: memoId, data: null });
       }
       setIsLoading(false);
     }, (error) => {
@@ -47,6 +48,9 @@ export const useMemoStatus = (memoId: string | null) => {
 
     return () => unsubscribe();
   }, [memoId]);
+
+  // Prevent returning stale data for a different memoId
+  const memoData = state.id === memoId ? state.data : null;
 
   return { memoData, isLoading };
 };

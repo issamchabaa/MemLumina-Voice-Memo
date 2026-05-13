@@ -55,10 +55,18 @@ export function HistoryView({ onBack, onSelectMemo, onRetryUpload }: HistoryView
   }
 
   const renderMemoCard = (memo: VoiceMemo) => (
-    <button
+    <div
       key={memo.id}
       onClick={() => onSelectMemo(memo.id)}
-      className="w-full glass-panel rounded-2xl p-5 text-left transition-all hover:bg-white/5 active:scale-[0.98] group relative overflow-hidden"
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onSelectMemo(memo.id)
+        }
+      }}
+      className="w-full glass-panel rounded-2xl p-5 text-left transition-all hover:bg-white/5 active:scale-[0.98] group relative overflow-hidden cursor-pointer block"
     >
       <div className="flex justify-between items-start mb-3">
         <div className="flex items-center space-x-2">
@@ -114,7 +122,7 @@ export function HistoryView({ onBack, onSelectMemo, onRetryUpload }: HistoryView
       </p>
 
       <div className="absolute left-0 bottom-0 h-[1px] w-full opacity-0 group-hover:opacity-100 transition-opacity bg-gradient-to-r from-transparent via-[#00DBE7]/20 to-transparent" />
-    </button>
+    </div>
   )
 
   const getStatusColor = (status: string) => {

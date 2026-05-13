@@ -43,6 +43,11 @@ function App() {
 
   const { uploadMemo, retryUpload, isUploading, error: uploadError, syncOfflineMemos } = useMemoUpload()
   const { memoData, isLoading: isMemoLoading } = useMemoStatus(lastMemoId)
+  const isSelectedMemoLoading = Boolean(lastMemoId) && isMemoLoading && !memoData
+  const canInitializeCapture = !lastMemoId && !!audioBlob
+  const canRetryUpload = memoData?.status === 'local-only' && !!lastMemoId
+  const canPushToLedger = memoData?.status === 'transcribed'
+  const showPrimaryAction = canInitializeCapture || canRetryUpload || canPushToLedger
 
   const handlePushToLedger = useCallback(async () => {
     if (!lastMemoId) return
@@ -247,10 +252,13 @@ function App() {
           <HistoryView 
             onBack={() => setActiveView('capture')} 
             onSelectMemo={(id) => {
+              setClsReceipt(null)
+              setSyncError(null)
+              setSyncStatus('idle')
+              setEditedTranscript('')
               setLastMemoId(id)
               setShowReview(true)
               setActiveView('capture')
-              setEditedTranscript('') 
             }}
             onRetryUpload={handleRetryUpload}
           />
@@ -437,7 +445,9 @@ function App() {
             <div className="glass-panel rounded-2xl overflow-hidden group">
               <div className="p-4 border-b border-white/5 bg-white/5 flex justify-between items-center">
                 <div className="flex items-center space-x-2">
-                  {memoData?.status === 'processed' ? (
+                  {isSelectedMemoLoading ? (
+                    <Activity size={14} className="text-[#00DBE7] animate-pulse" />
+                  ) : memoData?.status === 'processed' ? (
                     <CheckCircle2 size={14} className="text-[#00FF94]" />
                   ) : memoData?.status === 'submitted' ? (
                     <Upload size={14} className="text-[#00DBE7] animate-pulse" />
@@ -449,7 +459,8 @@ function App() {
                     <Activity size={14} className="text-[#EBB2FF] animate-pulse" />
                   )}
                   <span className="text-[10px] uppercase tracking-widest font-black text-white/50">
-                    {memoData?.status === 'transcribing' ? 'Neural Processing' : 
+                    {isSelectedMemoLoading ? 'Loading Selected Memo' :
+                     memoData?.status === 'transcribing' ? 'Neural Processing' : 
                      memoData?.status === 'transcribed' ? 'Transcript Ready — Awaiting Ledger Ingestion' :
                      memoData?.status === 'submitted' ? 'Ingesting into Cognitive Ledger' :
                      memoData?.status === 'processed' ? 'Accepted by Cognitive Ledger' :
@@ -457,12 +468,13 @@ function App() {
                   </span>
                 </div>
                 <span className={`text-[9px] font-mono px-2 py-0.5 rounded uppercase ${
+                  isSelectedMemoLoading ? 'text-[#00DBE7]/70 bg-[#00DBE7]/10' :
                   memoData?.status === 'transcribed' ? 'text-amber-400/70 bg-amber-400/10' :
                   memoData?.status === 'submitted' ? 'text-[#00DBE7]/70 bg-[#00DBE7]/10' :
                   memoData?.status === 'processed' ? 'text-[#00FF94]/70 bg-[#00FF94]/10' :
                   'text-[#EBB2FF]/70 bg-[#EBB2FF]/10'
                 }`}>
-                  {memoData?.status || 'awaiting_sync'}
+                  {isSelectedMemoLoading ? 'loading' : memoData?.status || 'awaiting_sync'}
                 </span>
               </div>
               <div className="p-8 relative">
@@ -472,7 +484,19 @@ function App() {
                   </div>
                 )}
                 
-                {lastMemoId && (memoData?.status === 'uploading' || memoData?.status === 'recorded' || memoData?.status === 'transcribing') && (
+                {isSelectedMemoLoading && (
+                  <div className="flex flex-col items-center justify-center space-y-4 py-8">
+                    <div className="relative">
+                      <Activity size={32} className="text-[#00DBE7] animate-pulse" />
+                      <div className="absolute inset-0 bg-[#00DBE7]/20 blur-xl animate-pulse" />
+                    </div>
+                    <p className="text-[10px] uppercase tracking-widest text-white/40 font-black animate-pulse">
+                      Loading memo state...
+                    </p>
+                  </div>
+                )}
+
+                {lastMemoId && !isSelectedMemoLoading && (memoData?.status === 'uploading' || memoData?.status === 'recorded' || memoData?.status === 'transcribing') && (
                   <div className="flex flex-col items-center justify-center space-y-4 py-8">
                     <div className="relative">
                       <Activity size={32} className="text-[#00DBE7] animate-pulse" />
@@ -588,19 +612,19 @@ function App() {
                 {(memoData?.status === 'submitted' || memoData?.status === 'processed') ? 'Back' : 'Purge'}
               </button>
               
-              {(memoData?.status !== 'submitted' && memoData?.status !== 'processed') && (
+              {showPrimaryAction && (
                 <button 
-                  onClick={memoData?.status === 'transcribed' ? handlePushToLedger : memoData?.status === 'local-only' ? () => handleRetryUpload(lastMemoId!) : handleInitializeCapture}
-                  disabled={syncStatus === 'uploading' || (syncStatus === 'success' && memoData?.status !== 'transcribed' && memoData?.status !== 'local-only') || syncStatus === 'submitted'}
+                  onClick={canPushToLedger ? handlePushToLedger : canRetryUpload ? () => handleRetryUpload(lastMemoId!) : handleInitializeCapture}
+                  disabled={isSelectedMemoLoading || syncStatus === 'uploading' || (syncStatus === 'success' && !canPushToLedger && !canRetryUpload) || syncStatus === 'submitted'}
                   className="flex-[2] py-4 bg-gradient-to-r from-[#00DBE7] to-[#EBB2FF] text-[#0B0B0C] rounded-xl font-black text-[11px] uppercase tracking-widest flex items-center justify-center space-x-2 shadow-2xl shadow-[#00DBE7]/20 hover:opacity-90 transition-all active:scale-[0.98] disabled:opacity-50"
                 >
                   {syncStatus === 'uploading' ? (
                     <Activity size={16} className="animate-spin" />
                   ) : syncStatus === 'submitted' ? (
                     <CheckCircle2 size={16} />
-                  ) : memoData?.status === 'transcribed' ? (
+                  ) : canPushToLedger ? (
                     <Cpu size={16} />
-                  ) : memoData?.status === 'local-only' ? (
+                  ) : canRetryUpload ? (
                     <RefreshCw size={16} />
                   ) : (
                     <Send size={16} />
@@ -608,8 +632,8 @@ function App() {
                   <span>
                     {syncStatus === 'uploading' ? 'Processing...' : 
                      syncStatus === 'submitted' ? 'Injected to CLS' : 
-                     memoData?.status === 'transcribed' ? 'Verify & Ingest' : 
-                     memoData?.status === 'local-only' ? 'Retry Upload' : 'Initialize Capture'}
+                     canPushToLedger ? 'Verify & Ingest' : 
+                     canRetryUpload ? 'Retry Upload' : 'Initialize Capture'}
                   </span>
                 </button>
               )}
@@ -669,5 +693,4 @@ function App() {
 }
 
 export default App
-
 

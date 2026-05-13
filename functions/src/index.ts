@@ -1,14 +1,13 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { SpeechClient } from '@google-cloud/speech';
+
 import { GoogleGenAI } from '@google/genai';
 import { createHash } from 'crypto';
 import { ClerkJob, RawTurn } from './types';
 
 admin.initializeApp();
  
-// STT V1 client
-const speechClient = new SpeechClient();
+
 
 // V2 client
 // STT logic integrated below
@@ -17,12 +16,21 @@ const speechClient = new SpeechClient();
  * Triggered when a new voice memo is uploaded to Firebase Storage.
  * It uses Google Speech-to-Text V2 (Chirp 2) to transcribe the audio and updates Firestore.
  */
-export const onMemoUploaded = functions.storage.object().onFinalize(async (object) => {
+export const onMemoUploaded = functions.runWith({ secrets: ["GEMINI_API_KEY"] }).storage.object().onFinalize(async (object) => {
   const filePath = object.name;
   
+  if (!filePath) return null;
+
   // Only process files in the memos directory with supported extensions
-  if (!filePath?.startsWith('uploads/') || !filePath.includes('/memos/') || (!filePath.endsWith('.webm') && !filePath.endsWith('.mp4'))) {
-    console.log('Skipping non-memo file:', filePath);
+  const supportedExtensions = ['.webm', '.mp4', '.aiff', '.wav', '.m4a', '.ogg', '.flac'];
+  const hasSupportedExtension = supportedExtensions.some(ext => filePath.toLowerCase().endsWith(ext));
+
+  const normalizedPath = filePath.toLowerCase().trim();
+  const isUploads = normalizedPath.startsWith('uploads/');
+  const isMemos = normalizedPath.includes('/memos/');
+  
+  if (!isUploads || !isMemos || !hasSupportedExtension) {
+    console.log(`Skipping file. Original: "${filePath}", Normalized: "${normalizedPath}", isUploads: ${isUploads}, isMemos: ${isMemos}, hasSupportedExtension: ${hasSupportedExtension}`);
     return null;
   }
 
@@ -31,20 +39,15 @@ export const onMemoUploaded = functions.storage.object().onFinalize(async (objec
   const fileName = parts[parts.length - 1];
   const memoId = fileName.split('.')[0];
   const gcsUri = `gs://${object.bucket}/${filePath}`;
-  const projectId = admin.instanceId().app.options.projectId || process.env.GCLOUD_PROJECT;
 
-  const request = {
-    audio: {
-      uri: gcsUri,
-    },
-    config: {
-      encoding: 'ENCODING_UNSPECIFIED' as any,
-      languageCode: 'en-US',
-      alternativeLanguageCodes: ['fr-FR'],
-      enableAutomaticPunctuation: true,
-      model: 'default',
-    },
-  };
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  let mimeType = 'audio/webm';
+  if (ext === 'mp4') mimeType = 'audio/mp4';
+  if (ext === 'm4a') mimeType = 'audio/m4a';
+  if (ext === 'wav') mimeType = 'audio/wav';
+  if (ext === 'ogg') mimeType = 'audio/ogg';
+  if (ext === 'flac') mimeType = 'audio/flac';
+  if (ext === 'aiff') mimeType = 'audio/aiff';
 
   try {
     const docRef = admin.firestore().collection(`users/${userId}/voice_memos`).doc(memoId);
@@ -65,64 +68,52 @@ export const onMemoUploaded = functions.storage.object().onFinalize(async (objec
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    console.log(`Starting STT V1 transcription (Long-Running) for: ${gcsUri}`);
-    
-    const [operation] = await speechClient.longRunningRecognize(request as any);
-    const [response] = await operation.promise();
-    
-    const transcript = response.results
-      ?.map(result => result.alternatives?.[0].transcript)
-      .join('\n');
+    console.log(`Starting Gemini Multimodal transcription for: ${gcsUri}`);
 
-    const transcriptConfidences = response.results
-      ?.map(result => result.alternatives?.[0].confidence)
-      .filter((value): value is number => typeof value === 'number');
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-    const transcriptConfidence = transcriptConfidences && transcriptConfidences.length > 0
-      ? transcriptConfidences.reduce((sum, value) => sum + value, 0) / transcriptConfidences.length
-      : null;
+    console.log(`Downloading audio file to buffer for Gemini processing...`);
+    const [fileBuffer] = await admin.storage().bucket(object.bucket).file(filePath).download();
+    const base64Data = fileBuffer.toString('base64');
 
-    const transcriptLanguage = response.results?.[0]?.languageCode || 'en-US';
-
-    console.log(`STT V1 Transcription successful (${transcriptLanguage}):`, transcript);
-
-    const transcriptProvider = 'google_speech_to_text_v1';
-    const transcriptModel = 'default';
-
-    let cleanTranscriptText = transcript || '';
-    if (transcript) {
-      try {
-        const ai = new GoogleGenAI({ project: projectId, location: 'us-central1', vertexai: true });
-        const aiResponse = await ai.models.generateContent({
-          model: 'gemini-1.5-flash-002',
-          contents: `You are an expert cognitive assistant. Your task is to refine a raw voice transcription into a high-quality cognitive memo.
-The transcription may be in English or French. Maintain the original language of the speaker.
+    const aiResponse = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [
+        {
+          inlineData: {
+            mimeType,
+            data: base64Data
+          }
+        },
+        {
+          text: `You are an expert cognitive assistant. Your task is to accurately transcribe this voice memo into a high-quality cognitive memo. 
+The speaker may be speaking in English or French, or both. Maintain the original language of the speaker. Do not force phonetic interpretations from the wrong language.
 
 Follow these rules:
-1. FIX errors: Correct typos, grammatical slips, and misheard words in the detected language.
-2. REMOVE noise: Strip filler words (ums, ahs, like, you know, euh, alors), false starts, and redundant repetitions.
-3. STRUCTURE: Use clear headings if the content is long. Use bullet points for lists of items or instructions.
-4. TONE: Maintain the speaker's original intent and urgency, but make it professional and readable.
-5. FORMAT: Return only the cleaned text in the original language.
+1. TRANSCRIBE: Accurately transcribe the audio. Do NOT translate it to another language.
+2. FIX errors: Correct typos and grammatical slips, but keep the original meaning.
+3. REMOVE noise: Strip filler words (ums, ahs, like, you know, euh, alors), false starts, and redundant repetitions.
+4. STRUCTURE: Use clear headings if the content is long. Use bullet points for lists of items or instructions.
+5. FORMAT: Return only the final transcribed and cleaned text in the original language. Do not include any conversational filler from yourself.`
+        }
+      ]
+    });
+    
+    const cleanTranscriptText = aiResponse.text || '';
+    console.log('Gemini multimodal transcription successful:', cleanTranscriptText);
 
-Raw Transcript:
-${transcript}`
-        });
-        cleanTranscriptText = aiResponse.text || transcript;
-        console.log('Gemini cleanup successful');
-      } catch (aiError) {
-        console.error('Gemini cleanup failed, falling back to raw transcript:', aiError);
-      }
-    }
+    const transcriptProvider = 'gemini-2.5-flash';
+    const transcriptModel = 'gemini-2.5-flash';
+    const transcriptLanguage = 'auto';
 
     await docRef.update({
       status: 'transcribed',
       transcriptText: cleanTranscriptText,
-      rawTranscriptText: transcript || '', 
+      rawTranscriptText: cleanTranscriptText, 
       transcriptProvider,
       transcriptModel,
       transcriptLanguage,
-      transcriptConfidence,
+      transcriptConfidence: null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -324,7 +315,7 @@ export const onClerkJobUpdated = functions.firestore.document('users/{userId}/cl
       
       try {
         const memoRef = db.collection(`users/${newValue.userId}/voice_memos`).doc(memoId);
-        const memoSnap = await memoRef.get();
+        await memoRef.get();
         
           await memoRef.update({
             status: 'processed',
