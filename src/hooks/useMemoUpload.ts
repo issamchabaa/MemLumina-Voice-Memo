@@ -161,5 +161,14 @@ export const useMemoUpload = () => {
     }
   }, []);
 
-  return { uploadMemo, retryUpload, isUploading, error, syncOfflineMemos };
+  const purgeLocalMemo = useCallback(async (memoId: string) => {
+    try {
+      await del(`offline-memo-${memoId}`);
+      console.log(`Purged local audio for memo: ${memoId}`);
+    } catch (err) {
+      console.error(`Failed to purge local audio: ${memoId}`, err);
+    }
+  }, []);
+
+  return { uploadMemo, retryUpload, isUploading, error, syncOfflineMemos, purgeLocalMemo };
 };

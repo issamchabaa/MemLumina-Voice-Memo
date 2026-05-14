@@ -1,11 +1,11 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { Mic, Square, Send, Info, Activity, LogIn, Settings, History, Shield, Cpu, CheckCircle2, AlertCircle, AlertTriangle, Upload, Database, ArrowLeft, RefreshCw, Clock } from 'lucide-react'
+import { Mic, Square, Send, Info, Activity, LogIn, Settings, History, Shield, Cpu, CheckCircle2, AlertCircle, AlertTriangle, Upload, Database, ArrowLeft, RefreshCw, Clock, Trash2 } from 'lucide-react'
 import { useVoiceRecorder } from './hooks/useVoiceRecorder'
 import { useMemoUpload } from './hooks/useMemoUpload'
 import { useMemoStatus } from './hooks/useMemoStatus'
 import { auth, functions, db } from './firebase'
 import { onAuthStateChanged, User } from 'firebase/auth'
-import { doc, setDoc, getDoc } from 'firebase/firestore'
+import { doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { HistoryView } from './HistoryView'
 import { AuthModal } from './AuthModal'
@@ -42,7 +42,7 @@ function App() {
     resetRecording 
   } = useVoiceRecorder()
 
-  const { uploadMemo, retryUpload, isUploading, error: uploadError, syncOfflineMemos } = useMemoUpload()
+  const { uploadMemo, retryUpload, isUploading, error: uploadError, syncOfflineMemos, purgeLocalMemo } = useMemoUpload()
   const { memoData, isLoading: isMemoLoading } = useMemoStatus(lastMemoId)
   const isSelectedMemoLoading = Boolean(lastMemoId) && isMemoLoading && !memoData
   const canInitializeCapture = !lastMemoId && !!audioBlob
@@ -90,6 +90,36 @@ function App() {
       }
     }
   }, [lastMemoId, autoSubmitEnabled, editedTranscript, memoData?.transcriptText, functions])
+
+  const handleDestroyMemo = useCallback(async () => {
+    if (!lastMemoId || !user) return
+    
+    if (window.confirm("CRITICAL ACTION: This will permanently remove this record from your Cognitive Ledger and Cloud Storage. Continue?")) {
+      try {
+        setSyncStatus('uploading')
+        // 1. Delete from Firestore
+        await deleteDoc(doc(db, `users/${user.uid}/voice_memos`, lastMemoId))
+        
+        // 2. Delete from Local Vault
+        await purgeLocalMemo(lastMemoId)
+        
+        console.log(`Memo ${lastMemoId} destroyed successfully.`)
+        
+        // 3. Reset state
+        setShowReview(false)
+        resetRecording()
+        setEditedTranscript('')
+        setLastMemoId(null)
+        setSyncStatus('idle')
+        setClsReceipt(null)
+        setSyncError(null)
+      } catch (err) {
+        console.error('Failed to destroy memo', err)
+        setSyncStatus('error')
+        setSyncError({ message: 'Neural record destruction failed. Protocol error.', retryable: false })
+      }
+    }
+  }, [lastMemoId, user, purgeLocalMemo, resetRecording])
 
   useEffect(() => {
     syncOfflineMemos()
@@ -622,8 +652,11 @@ function App() {
             <div className="pt-6 flex space-x-3">
               <button 
                 onClick={() => {
-                  if (lastMemoId && (memoData?.status === 'recorded' || memoData?.status === 'transcribed')) {
-                    localStorage.removeItem(`draft-${lastMemoId}`)
+                  if (lastMemoId) {
+                    purgeLocalMemo(lastMemoId);
+                    if (memoData?.status === 'recorded' || memoData?.status === 'transcribed') {
+                      localStorage.removeItem(`draft-${lastMemoId}`)
+                    }
                   }
                   setShowReview(false)
                   resetRecording()
@@ -633,10 +666,29 @@ function App() {
                   setClsReceipt(null)
                   setSyncError(null)
                 }}
-                className="flex-1 py-4 rounded-xl border border-white/5 text-white/40 font-bold text-[11px] uppercase tracking-widest hover:bg-white/5 transition-all"
+                className="flex-1 py-4 rounded-xl border border-white/5 text-white/40 font-bold text-[11px] uppercase tracking-widest hover:bg-white/5 transition-all group relative"
               >
-                {(memoData?.status === 'submitted' || memoData?.status === 'processed') ? 'Back' : 'Purge'}
+                <span>{(memoData?.status === 'submitted' || memoData?.status === 'processed') ? 'Back' : 'Purge'}</span>
+                
+                {!(memoData?.status === 'submitted' || memoData?.status === 'processed') && (
+                  <div className="absolute -bottom-10 left-0 w-full opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none text-center">
+                    <p className="text-[7px] text-white/20 uppercase tracking-widest leading-tight">
+                      Removes audio from device storage.<br/>Transcript remains in cloud.
+                    </p>
+                  </div>
+                )}
               </button>
+
+              {(memoData?.status === 'submitted' || memoData?.status === 'processed' || memoData?.status === 'error') && (
+                <button 
+                  onClick={handleDestroyMemo}
+                  disabled={syncStatus === 'uploading'}
+                  className="flex-1 py-4 rounded-xl border border-red-500/20 text-red-400 font-bold text-[11px] uppercase tracking-widest hover:bg-red-500/10 transition-all flex items-center justify-center space-x-2"
+                >
+                  <Trash2 size={14} />
+                  <span>Destroy</span>
+                </button>
+              )}
               
               {showPrimaryAction && (
                 <button 
