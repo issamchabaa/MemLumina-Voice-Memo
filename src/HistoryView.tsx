@@ -5,9 +5,10 @@ interface HistoryViewProps {
   onBack: () => void
   onSelectMemo: (memoId: string) => void
   onRetryUpload?: (memoId: string) => void
+  onDeleteMemo?: (memoId: string) => void
 }
 
-export function HistoryView({ onBack, onSelectMemo, onRetryUpload }: HistoryViewProps) {
+export function HistoryView({ onBack, onSelectMemo, onRetryUpload, onDeleteMemo }: HistoryViewProps) {
   const { memos, isLoading, error } = useMemoHistory()
 
   const visibleMemos = memos.filter(m => {
@@ -89,6 +90,18 @@ export function HistoryView({ onBack, onSelectMemo, onRetryUpload }: HistoryView
               className="p-1 rounded bg-[#00DBE7]/10 text-[#00DBE7] hover:bg-[#00DBE7]/20 transition-colors"
             >
               <RefreshCw size={12} />
+            </button>
+          )}
+          {onDeleteMemo && (
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteMemo(memo.id);
+              }}
+              className="p-1 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+              title="Destroy Record"
+            >
+              <Trash2 size={12} />
             </button>
           )}
           <div className="flex flex-col items-end">

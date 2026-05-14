@@ -13,6 +13,8 @@ export interface MemoStatus {
   rawTurnId?: string;
   clerkJobId?: string;
   submittedAt?: any;
+  storagePath?: string;
+  audioURL?: string;
   errorDetails?: string;
   audioRetainedUntil?: any;
 }

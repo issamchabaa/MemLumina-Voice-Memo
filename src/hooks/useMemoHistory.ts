@@ -10,6 +10,8 @@ export interface VoiceMemo {
   audioStaged?: boolean
   transcriptText?: string
   rawTranscriptText?: string
+  storagePath?: string
+  audioURL?: string
   errorDetails?: string
   createdAt: any
   updatedAt: any

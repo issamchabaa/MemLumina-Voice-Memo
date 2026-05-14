@@ -3,10 +3,11 @@ import { Mic, Square, Send, Info, Activity, LogIn, Settings, History, Shield, Cp
 import { useVoiceRecorder } from './hooks/useVoiceRecorder'
 import { useMemoUpload } from './hooks/useMemoUpload'
 import { useMemoStatus } from './hooks/useMemoStatus'
-import { auth, functions, db } from './firebase'
+import { auth, functions, db, storage } from './firebase'
 import { onAuthStateChanged, User } from 'firebase/auth'
 import { doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
+import { deleteObject, ref as storageRef } from 'firebase/storage'
 import { HistoryView } from './HistoryView'
 import { AuthModal } from './AuthModal'
 import { HelpModal } from './HelpModal'
@@ -91,35 +92,59 @@ function App() {
     }
   }, [lastMemoId, autoSubmitEnabled, editedTranscript, memoData?.transcriptText, functions])
 
-  const handleDestroyMemo = useCallback(async () => {
-    if (!lastMemoId || !user) return
+  const deleteMemo = useCallback(async (memoId: string) => {
+    if (!user) return
     
     if (window.confirm("CRITICAL ACTION: This will permanently remove this record from your Cognitive Ledger and Cloud Storage. Continue?")) {
       try {
         setSyncStatus('uploading')
+        const memoRef = doc(db, `users/${user.uid}/voice_memos`, memoId)
+        const memoSnap = await getDoc(memoRef)
+        const storagePath = memoSnap.exists() ? memoSnap.data().storagePath : null
+
+        if (storagePath) {
+          try {
+            await deleteObject(storageRef(storage, storagePath))
+          } catch (err: any) {
+            if (err?.code !== 'storage/object-not-found') {
+              throw err
+            }
+          }
+        }
+
         // 1. Delete from Firestore
-        await deleteDoc(doc(db, `users/${user.uid}/voice_memos`, lastMemoId))
+        await deleteDoc(memoRef)
         
         // 2. Delete from Local Vault
-        await purgeLocalMemo(lastMemoId)
+        await purgeLocalMemo(memoId)
+        localStorage.removeItem(`draft-${memoId}`)
         
-        console.log(`Memo ${lastMemoId} destroyed successfully.`)
+        console.log(`Memo ${memoId} destroyed successfully.`)
         
-        // 3. Reset state
-        setShowReview(false)
-        resetRecording()
-        setEditedTranscript('')
-        setLastMemoId(null)
-        setSyncStatus('idle')
-        setClsReceipt(null)
-        setSyncError(null)
+        // 3. If it's the current memo, reset state
+        if (memoId === lastMemoId) {
+          setShowReview(false)
+          resetRecording()
+          setEditedTranscript('')
+          setLastMemoId(null)
+          setSyncStatus('idle')
+          setClsReceipt(null)
+          setSyncError(null)
+        } else {
+          setSyncStatus('idle')
+        }
       } catch (err) {
         console.error('Failed to destroy memo', err)
         setSyncStatus('error')
         setSyncError({ message: 'Neural record destruction failed. Protocol error.', retryable: false })
       }
     }
-  }, [lastMemoId, user, purgeLocalMemo, resetRecording])
+  }, [user, lastMemoId, purgeLocalMemo, resetRecording])
+
+  const handleDestroyMemo = useCallback(async () => {
+    if (!lastMemoId) return
+    await deleteMemo(lastMemoId)
+  }, [lastMemoId, deleteMemo])
 
   useEffect(() => {
     syncOfflineMemos()
@@ -292,6 +317,7 @@ function App() {
               setActiveView('capture')
             }}
             onRetryUpload={handleRetryUpload}
+            onDeleteMemo={deleteMemo}
           />
         ) : activeView === 'diagnostics' ? (
           <div className="w-full space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-500">
@@ -651,21 +677,23 @@ function App() {
             {/* Action Bar */}
             <div className="pt-6 flex space-x-3">
               <button 
-                onClick={() => {
-                  if (lastMemoId) {
-                    purgeLocalMemo(lastMemoId);
-                    if (memoData?.status === 'recorded' || memoData?.status === 'transcribed') {
-                      localStorage.removeItem(`draft-${lastMemoId}`)
-                    }
+                onClick={async () => {
+                  if (memoData?.status === 'submitted' || memoData?.status === 'processed') {
+                    setShowReview(false)
+                    resetRecording()
+                    setEditedTranscript('')
+                    setLastMemoId(null)
+                    setSyncStatus('idle')
+                    setClsReceipt(null)
+                    setSyncError(null)
+                    return
                   }
-                  setShowReview(false)
-                  resetRecording()
-                  setEditedTranscript('')
-                  setLastMemoId(null)
-                  setSyncStatus('idle')
-                  setClsReceipt(null)
-                  setSyncError(null)
+
+                  if (lastMemoId) {
+                    await deleteMemo(lastMemoId)
+                  }
                 }}
+                disabled={syncStatus === 'uploading'}
                 className="flex-1 py-4 rounded-xl border border-white/5 text-white/40 font-bold text-[11px] uppercase tracking-widest hover:bg-white/5 transition-all group relative"
               >
                 <span>{(memoData?.status === 'submitted' || memoData?.status === 'processed') ? 'Back' : 'Purge'}</span>
@@ -673,13 +701,13 @@ function App() {
                 {!(memoData?.status === 'submitted' || memoData?.status === 'processed') && (
                   <div className="absolute -bottom-10 left-0 w-full opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none text-center">
                     <p className="text-[7px] text-white/20 uppercase tracking-widest leading-tight">
-                      Removes audio from device storage.<br/>Transcript remains in cloud.
+                      Removes staged audio, cloud audio,<br/>and transcript record.
                     </p>
                   </div>
                 )}
               </button>
 
-              {(memoData?.status === 'submitted' || memoData?.status === 'processed' || memoData?.status === 'error') && (
+              {lastMemoId && (
                 <button 
                   onClick={handleDestroyMemo}
                   disabled={syncStatus === 'uploading'}
