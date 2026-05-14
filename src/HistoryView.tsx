@@ -10,15 +10,16 @@ interface HistoryViewProps {
 export function HistoryView({ onBack, onSelectMemo, onRetryUpload }: HistoryViewProps) {
   const { memos, isLoading, error } = useMemoHistory()
 
-  // Group memos into operational sections
-  const needsAttention = memos.filter(m => ['recorded', 'transcribed', 'error', 'local-only'].includes(m.status))
-  const inProgress = memos.filter(m => ['transcribing', 'uploading', 'submitted'].includes(m.status))
-  const completed = memos.filter(m => {
+  const visibleMemos = memos.filter(m => {
     if (m.status !== 'processed') return false
-    // Exit Strategy: Hide processed memos after 24 hours
     if (!m.updatedAt || !m.updatedAt.toDate) return true
     return (Date.now() - m.updatedAt.toDate().getTime()) < 24 * 60 * 60 * 1000
-  })
+  }).concat(memos.filter(m => m.status !== 'processed'))
+    .sort((a, b) => {
+      const aTime = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0
+      const bTime = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0
+      return bTime - aTime
+    })
 
   const getActionHint = (status: string) => {
     switch (status) {
@@ -177,52 +178,15 @@ export function HistoryView({ onBack, onSelectMemo, onRetryUpload }: HistoryView
               <div key={i} className="h-24 w-full glass-panel rounded-2xl animate-pulse" />
             ))}
           </div>
-        ) : memos.length === 0 ? (
+        ) : visibleMemos.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 space-y-4 glass-panel rounded-2xl border-dashed">
             <Clock size={40} className="text-white/10" />
             <p className="text-xs uppercase tracking-widest font-black text-white/20">No entries recorded</p>
           </div>
         ) : (
-          <>
-            {/* === NEEDS ATTENTION === */}
-            {needsAttention.length > 0 && (
-              <div className="space-y-3">
-                <div className="flex items-center space-x-2 px-1">
-                  <div className="w-1.5 h-1.5 rounded-full bg-amber-400" style={{ boxShadow: '0 0 8px rgba(251,191,36,0.8)' }} />
-                  <p className="text-[9px] uppercase tracking-[0.3em] font-black text-amber-400/60">
-                    Needs Attention ({needsAttention.length})
-                  </p>
-                </div>
-                {needsAttention.map((memo) => renderMemoCard(memo))}
-              </div>
-            )}
-
-            {/* === IN PROGRESS === */}
-            {inProgress.length > 0 && (
-              <div className="space-y-3">
-                <div className="flex items-center space-x-2 px-1">
-                  <div className="w-1.5 h-1.5 rounded-full bg-[#00DBE7] animate-pulse" style={{ boxShadow: '0 0 8px rgba(0,219,231,0.8)' }} />
-                  <p className="text-[9px] uppercase tracking-[0.3em] font-black text-[#00DBE7]/60">
-                    In Progress ({inProgress.length})
-                  </p>
-                </div>
-                {inProgress.map((memo) => renderMemoCard(memo))}
-              </div>
-            )}
-
-            {/* === COMPLETED === */}
-            {completed.length > 0 && (
-              <div className="space-y-3">
-                <div className="flex items-center space-x-2 px-1">
-                  <div className="w-1.5 h-1.5 rounded-full bg-[#00FF94]" style={{ boxShadow: '0 0 8px rgba(0,255,148,0.8)' }} />
-                  <p className="text-[9px] uppercase tracking-[0.3em] font-black text-[#00FF94]/60">
-                    Verified Ledger ({completed.length})
-                  </p>
-                </div>
-                {completed.map((memo) => renderMemoCard(memo))}
-              </div>
-            )}
-          </>
+          <div className="space-y-3">
+            {visibleMemos.map((memo) => renderMemoCard(memo))}
+          </div>
         )}
       </div>
 

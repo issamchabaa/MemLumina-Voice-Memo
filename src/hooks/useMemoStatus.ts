@@ -22,7 +22,8 @@ export const useMemoStatus = (memoId: string | null) => {
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
-    if (!memoId) {
+    const user = auth.currentUser;
+    if (!user || !memoId) {
       setState({ id: null, data: null });
       setIsLoading(false);
       return;
@@ -30,15 +31,16 @@ export const useMemoStatus = (memoId: string | null) => {
 
     setIsLoading(true);
     setState({ id: memoId, data: null }); // Clear previous memo data to prevent stale state bleed
-    const docRef = doc(db, `users/${auth.currentUser?.uid}/voice_memos`, memoId);
+    const docRef = doc(db, `users/${user.uid}/voice_memos`, memoId);
 
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data() as MemoStatus;
-        setState({ id: memoId, data });
+        // Verify this update is for the current memoId to handle race conditions
+        setState(prev => prev.id === memoId ? { id: memoId, data } : prev);
       } else {
         console.warn(`Memo with ID ${memoId} not found.`);
-        setState({ id: memoId, data: null });
+        setState(prev => prev.id === memoId ? { id: memoId, data: null } : prev);
       }
       setIsLoading(false);
     }, (error) => {
@@ -47,7 +49,7 @@ export const useMemoStatus = (memoId: string | null) => {
     });
 
     return () => unsubscribe();
-  }, [memoId]);
+  }, [memoId, auth.currentUser?.uid]); // Add uid to dependencies
 
   // Prevent returning stale data for a different memoId
   const memoData = state.id === memoId ? state.data : null;

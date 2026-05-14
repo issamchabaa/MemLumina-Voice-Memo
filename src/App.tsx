@@ -10,6 +10,7 @@ import { httpsCallable } from 'firebase/functions'
 import { HistoryView } from './HistoryView'
 import { AuthModal } from './AuthModal'
 import { HelpModal } from './HelpModal'
+import { buildInfo } from './buildInfo'
 
 // Capture modes removed as per V2 specification
 
@@ -189,7 +190,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-between p-6 md:p-10 bg-[#0B0B0C] text-[#F8FAF7] relative overflow-hidden">
+    <div className="h-screen w-full flex flex-col items-center bg-[#0B0B0C] text-[#F8FAF7] relative overflow-hidden">
       {!isOnline && (
         <div className="absolute top-0 left-0 w-full bg-yellow-500/90 text-[#0B0B0C] py-2 px-4 z-50 flex items-center justify-center space-x-2 shadow-lg shadow-yellow-500/20">
           <Database size={14} />
@@ -247,7 +248,7 @@ function App() {
       </header>
 
       {/* Main Cockpit Area */}
-      <main className="flex-1 w-full max-w-lg flex flex-col items-center justify-center space-y-12 z-20">
+      <main className={`flex-1 w-full max-w-lg flex flex-col items-center z-20 overflow-y-auto scrollbar-hide px-6 md:px-0 ${activeView === 'capture' && !showReview ? 'justify-center' : 'justify-start pt-8 pb-12'}`}>
         {activeView === 'history' ? (
           <HistoryView 
             onBack={() => setActiveView('capture')} 
@@ -305,6 +306,30 @@ function App() {
                     <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${autoSubmitEnabled ? 'right-1' : 'left-1'}`} />
                   </button>
                 </div>
+              </div>
+
+              <div className="h-[1px] bg-white/5 w-full" />
+              <div className="space-y-3">
+                <p className="text-[9px] uppercase tracking-widest text-white/20 font-black">Build metadata</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-3 bg-white/5 rounded-xl border border-white/5">
+                    <p className="text-[8px] text-white/40 uppercase mb-1">Version</p>
+                    <p className="text-[10px] text-white/60 font-bold font-mono break-all">v{buildInfo.version}</p>
+                  </div>
+                  <div className="p-3 bg-white/5 rounded-xl border border-white/5">
+                    <p className="text-[8px] text-white/40 uppercase mb-1">Image Tag</p>
+                    <p className="text-[10px] text-white/60 font-bold font-mono break-all">{buildInfo.imageTag}</p>
+                  </div>
+                  <div className="p-3 bg-white/5 rounded-xl border border-white/5">
+                    <p className="text-[8px] text-white/40 uppercase mb-1">Commit</p>
+                    <p className="text-[10px] text-white/60 font-bold font-mono break-all">{buildInfo.shortSha}</p>
+                  </div>
+                  <div className="p-3 bg-white/5 rounded-xl border border-white/5">
+                    <p className="text-[8px] text-white/40 uppercase mb-1">Build ID</p>
+                    <p className="text-[10px] text-white/60 font-bold font-mono break-all">{buildInfo.buildId}</p>
+                  </div>
+                </div>
+                <p className="text-[8px] text-white/30 font-mono break-all">{buildInfo.builtAt}</p>
               </div>
 
               <div className="h-[1px] bg-white/5 w-full" />
@@ -528,7 +553,8 @@ function App() {
                 {memoData?.transcriptText && (
                   <div className="animate-in fade-in duration-1000 w-full space-y-4">
                     <textarea 
-                      value={editedTranscript || memoData.transcriptText}
+                      key={lastMemoId}
+                      value={editedTranscript || ''}
                       onChange={(e) => setEditedTranscript(e.target.value)}
                       disabled={memoData.status === 'submitted' || memoData.status === 'processed'}
                       className={`w-full bg-transparent border-none resize-none focus:ring-0 text-white/90 font-medium italic font-outfit p-0 min-h-[120px] ${
@@ -693,4 +719,3 @@ function App() {
 }
 
 export default App
-
